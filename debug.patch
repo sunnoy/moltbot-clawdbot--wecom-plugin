@@ -1,0 +1,15 @@
+--- index.js.original
++++ index.js
+@@ -401,6 +401,12 @@
+     dispatcherOptions: {
+       deliver: async (payload, info) => {
++        logger.debug("WxWork deliver called", { 
++          streamId, 
++          kind: info?.kind, 
++          hasPayload: !!payload,
++          textLength: payload?.text?.length 
++        });
++        
+         await deliverWxWorkReply({
+           payload,
+           account,

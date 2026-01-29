@@ -1,0 +1,51 @@
+{
+    "name": "molt-plugin-wxwork",
+    "version": "0.2.1",
+    "description": "Enterprise WeChat AI Bot channel plugin for Moltbot",
+    "type": "module",
+    "main": "index.js",
+    "files": [
+        "index.js",
+        "client.js",
+        "config.js",
+        "crypto.js",
+        "logger.js",
+        "readme.md",
+        "stream-manager.js",
+        "types.js",
+        "utils.js",
+        "webhook.js"
+    ],
+    "dependencies": {
+        "fast-xml-parser": "^4.2.0"
+    },
+    "moltbot": {
+        "extensions": [
+            "./index.js"
+        ],
+        "channel": {
+            "id": "wxwork",
+            "label": "Enterprise WeChat",
+            "selectionLabel": "Enterprise WeChat (AI Bot)",
+            "docsPath": "https://github.com/moltbot/molt-plugin-wxwork",
+            "blurb": "Support for Enterprise WeChat (WeCom) AI Bot integration",
+            "aliases": [
+                "wecom",
+                "wework"
+            ]
+        },
+        "install": {
+            "defaultChoice": "npm",
+            "npmSpec": "molt-plugin-wxwork"
+        }
+    },
+    "keywords": [
+        "moltbot",
+        "wxwork",
+        "wecom",
+        "chat",
+        "plugin"
+    ],
+    "author": "",
+    "license": "ISC"
+}
