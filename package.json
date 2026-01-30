@@ -1,7 +1,7 @@
 {
-    "name": "molt-plugin-wxwork",
+    "name": "openclaw-plugin-wxwork",
     "version": "0.2.1",
-    "description": "Enterprise WeChat AI Bot channel plugin for Moltbot",
+    "description": "Enterprise WeChat AI Bot channel plugin for OpenClaw",
     "type": "module",
     "main": "index.js",
     "files": [
@@ -9,8 +9,11 @@
         "client.js",
         "config.js",
         "crypto.js",
+        "dynamic-agent.js",
         "logger.js",
-        "readme.md",
+        "README.md",
+        "LICENSE",
+        "CONTRIBUTING.md",
         "stream-manager.js",
         "types.js",
         "utils.js",
@@ -19,7 +22,7 @@
     "dependencies": {
         "fast-xml-parser": "^4.2.0"
     },
-    "moltbot": {
+    "openclaw": {
         "extensions": [
             "./index.js"
         ],
@@ -27,7 +30,7 @@
             "id": "wxwork",
             "label": "Enterprise WeChat",
             "selectionLabel": "Enterprise WeChat (AI Bot)",
-            "docsPath": "https://github.com/moltbot/molt-plugin-wxwork",
+            "docsPath": "https://github.com/sunnoy/openclaw-wecom-plugin",
             "blurb": "Support for Enterprise WeChat (WeCom) AI Bot integration",
             "aliases": [
                 "wecom",
@@ -36,11 +39,11 @@
         },
         "install": {
             "defaultChoice": "npm",
-            "npmSpec": "molt-plugin-wxwork"
+            "npmSpec": "openclaw-plugin-wxwork"
         }
     },
     "keywords": [
-        "moltbot",
+        "openclaw",
         "wxwork",
         "wecom",
         "chat",

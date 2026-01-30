@@ -1,13 +1,85 @@
 import { WxWorkWebhook } from "./webhook.js";
 import { logger } from "./logger.js";
 import { streamManager } from "./stream-manager.js";
+import {
+  generateAgentId,
+  getDynamicAgentConfig,
+  shouldTriggerGroupResponse,
+  extractGroupMessageContent,
+} from "./dynamic-agent.js";
 
 
 const DEFAULT_ACCOUNT_ID = "default";
 
+// =============================================================================
+// 命令白名单配置
+// =============================================================================
+
+// 默认允许的斜杠命令（用户操作安全的命令）
+const DEFAULT_COMMAND_ALLOWLIST = [
+  "/new",      // 新建会话
+  "/compact", // 压缩会话
+  "/help",    // 帮助
+  "/status",  // 状态
+];
+
+// 默认拦截消息
+const DEFAULT_COMMAND_BLOCK_MESSAGE = `⚠️ 该命令不可用。
+
+支持的命令：
+• **/new** - 新建会话
+• **/compact** - 压缩会话（保留上下文摘要）
+• **/help** - 查看帮助
+• **/status** - 查看状态`;
+
+/**
+ * 获取命令白名单配置
+ */
+function getCommandConfig(config) {
+  const wxwork = config?.channels?.wxwork || {};
+  const commands = wxwork.commands || {};
+  return {
+    allowlist: commands.allowlist || DEFAULT_COMMAND_ALLOWLIST,
+    blockMessage: commands.blockMessage || DEFAULT_COMMAND_BLOCK_MESSAGE,
+    enabled: commands.enabled !== false,  // 默认启用白名单
+  };
+}
+
+/**
+ * 检查命令是否在白名单中
+ * @param {string} message - 用户消息
+ * @param {Object} config - 配置
+ * @returns {{ isCommand: boolean, allowed: boolean, command: string | null }}
+ */
+function checkCommandAllowlist(message, config) {
+  const trimmed = message.trim();
+
+  // 不是斜杠命令
+  if (!trimmed.startsWith("/")) {
+    return { isCommand: false, allowed: true, command: null };
+  }
+
+  // 提取命令（取第一个空格之前的部分）
+  const command = trimmed.split(/\s+/)[0].toLowerCase();
+
+  const cmdConfig = getCommandConfig(config);
+
+  // 如果白名单功能禁用，允许所有命令
+  if (!cmdConfig.enabled) {
+    return { isCommand: true, allowed: true, command };
+  }
+
+  // 检查是否在白名单中
+  const allowed = cmdConfig.allowlist.some(cmd =>
+    cmd.toLowerCase() === command
+  );
+
+  return { isCommand: true, allowed, command };
+}
+
 // Runtime state (module-level singleton)
 let _runtime = null;
-let _moltbotConfig = null;
+let _openclawConfig = null;
 
 /**
  * Set the plugin runtime (called during plugin registration)
@@ -109,7 +181,7 @@ const wxworkChannelPlugin = {
     aliases: ["wecom", "wework"],
   },
   capabilities: {
-    chatTypes: ["direct"],
+    chatTypes: ["direct", "group"],  // 支持私聊和群聊
     reactions: false,
     threads: false,
     media: false,
@@ -463,13 +535,33 @@ async function processInboundMessage({ message, streamId, timestamp, nonce, acco
   const core = runtime.channel;
 
   const senderId = message.fromUser;
-  const rawBody = message.content || "";
+  const rawContent = message.content || "";
   const responseUrl = message.responseUrl;
-  const conversationId = `wxwork:${senderId}`;
+  const chatType = message.chatType || "single";  // "single" 或 "group"
+  const chatId = message.chatId || "";  // 群聊 ID
+  const isGroupChat = chatType === "group" && chatId;
+
+  // 确定 peerId：群聊用 chatId，私聊用 senderId
+  const peerId = isGroupChat ? chatId : senderId;
+  const peerKind = isGroupChat ? "group" : "dm";
+  const conversationId = isGroupChat ? `wxwork:group:${chatId}` : `wxwork:${senderId}`;
 
   // 设置用户当前活跃的 streamId，供 outbound.sendText 使用
+  // 群聊时用 chatId 作为 key
+  const streamKey = isGroupChat ? chatId : senderId;
   if (streamId) {
-    activeStreams.set(senderId, streamId);
+    activeStreams.set(streamKey, streamId);
+  }
+
+  // 群聊消息检查：是否满足触发条件（@提及）
+  let rawBody = rawContent;
+  if (isGroupChat) {
+    if (!shouldTriggerGroupResponse(rawContent, config)) {
+      logger.debug("WxWork: group message ignored (no mention)", { chatId, senderId });
+      return;
+    }
+    // 提取实际内容（移除 @提及）
+    rawBody = extractGroupMessageContent(rawContent, config);
   }
 
   const commandAuthorized = resolveWxWorkCommandAuthorized({
@@ -483,18 +575,71 @@ async function processInboundMessage({ message, streamId, timestamp, nonce, acco
     return;
   }
 
-  logger.info("WxWork processing message", { from: senderId, content: rawBody.substring(0, 50), streamId });
+  // ========================================================================
+  // 命令白名单检查
+  // ========================================================================
+  const commandCheck = checkCommandAllowlist(rawBody, config);
 
-  // Resolve agent route
+  if (commandCheck.isCommand && !commandCheck.allowed) {
+    // 命令不在白名单中，返回拒绝消息
+    const cmdConfig = getCommandConfig(config);
+    logger.warn("WxWork: blocked command", {
+      command: commandCheck.command,
+      from: senderId,
+      chatType: peerKind
+    });
+
+    // 通过流式响应返回拦截消息
+    if (streamId) {
+      streamManager.appendStream(streamId, cmdConfig.blockMessage);
+      streamManager.finishStream(streamId);
+      activeStreams.delete(streamKey);
+    }
+    return;
+  }
+
+  logger.info("WxWork processing message", {
+    from: senderId,
+    chatType: peerKind,
+    peerId,
+    content: rawBody.substring(0, 50),
+    streamId,
+    isCommand: commandCheck.isCommand,
+    command: commandCheck.command
+  });
+
+  // ========================================================================
+  // 动态 Agent 逻辑（极简版）
+  // 只需要生成 agentId 和构造 SessionKey，OpenClaw 会自动创建 workspace
+  // ========================================================================
+  const dynamicConfig = getDynamicAgentConfig(config);
+
+  // 生成目标 AgentId
+  const targetAgentId = dynamicConfig.enabled ? generateAgentId(peerKind, peerId) : null;
+
+  if (targetAgentId) {
+    logger.debug("Using dynamic agent", { agentId: targetAgentId, chatType: peerKind, peerId });
+  }
+
+  // ========================================================================
+  // 路由到目标 Agent
+  // ========================================================================
   const route = core.routing.resolveAgentRoute({
     cfg: config,
     channel: "wxwork",
     accountId: account.accountId,
     peer: {
-      kind: "dm",
-      id: senderId,
+      kind: peerKind,
+      id: peerId,
     },
   });
+
+  // 使用动态 Agent，覆盖默认路由
+  if (targetAgentId) {
+    route.agentId = targetAgentId;
+    route.sessionKey = `agent:${targetAgentId}:${peerKind}:${peerId}`;
+  }
+
 
   // Build inbound context
   const storePath = core.session.resolveStorePath(config.session?.store, {
@@ -506,9 +651,11 @@ async function processInboundMessage({ message, streamId, timestamp, nonce, acco
     sessionKey: route.sessionKey,
   });
 
+  // 构建消息头，群聊时显示发送者
+  const senderLabel = isGroupChat ? `[${senderId}]` : senderId;
   const body = core.reply.formatAgentEnvelope({
-    channel: "Enterprise WeChat",
-    from: senderId,
+    channel: isGroupChat ? "Enterprise WeChat Group" : "Enterprise WeChat",
+    from: senderLabel,
     timestamp: Date.now(),
     previousTimestamp,
     envelope: envelopeOptions,
@@ -523,10 +670,11 @@ async function processInboundMessage({ message, streamId, timestamp, nonce, acco
     To: conversationId,
     SessionKey: route.sessionKey,
     AccountId: route.accountId,
-    ChatType: "direct",
-    ConversationLabel: senderId,
+    ChatType: isGroupChat ? "group" : "direct",
+    ConversationLabel: isGroupChat ? `群聊 ${chatId}` : senderId,
     SenderName: senderId,
     SenderId: senderId,
+    GroupId: isGroupChat ? chatId : undefined,
     Provider: "wxwork",
     Surface: "wxwork",
     OriginatingChannel: "wxwork",
@@ -559,8 +707,8 @@ async function processInboundMessage({ message, streamId, timestamp, nonce, acco
           payload,
           account,
           responseUrl,
-          senderId,
-          streamId,  // 传递streamId用于流式更新
+          senderId: streamKey,  // 使用 streamKey（群聊时是 chatId）
+          streamId,
         });
 
         // 如果是最终回复,标记流为完成
@@ -582,7 +730,7 @@ async function processInboundMessage({ message, streamId, timestamp, nonce, acco
   // 确保在dispatch完成后标记流为完成（兜底机制）
   if (streamId) {
     streamManager.finishStream(streamId);
-    activeStreams.delete(senderId);  // 清理活跃流映射
+    activeStreams.delete(streamKey);  // 清理活跃流映射
     logger.info("WxWork stream finished (dispatch complete)", { streamId });
   }
 }
@@ -661,14 +809,14 @@ async function deliverWxWorkReply({ payload, account, responseUrl, senderId, str
 const plugin = {
   id: "wxwork",
   name: "Enterprise WeChat",
-  description: "Enterprise WeChat AI Bot channel plugin for Moltbot",
+  description: "Enterprise WeChat AI Bot channel plugin for OpenClaw",
   configSchema: { type: "object", additionalProperties: true, properties: {} },
   register(api) {
     logger.info("WxWork plugin registering...");
 
     // Save runtime for message processing
     setRuntime(api.runtime);
-    _moltbotConfig = api.config;
+    _openclawConfig = api.config;
 
     // Register channel
     api.registerChannel({ plugin: wxworkChannelPlugin });

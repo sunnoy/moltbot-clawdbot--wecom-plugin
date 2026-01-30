@@ -141,6 +141,15 @@ export class WxWorkWebhook {
             const msgId = data.msgid || `msg_${Date.now()}`;
             const fromUser = data.from?.userid || "";  // Note: "userid" not "user_id"
             const responseUrl = data.response_url || "";
+            const chatType = data.chattype || "single";  // "single" 或 "group"
+            const chatId = data.chatid || "";  // 群聊 ID（仅群聊时存在）
+            const aibotId = data.aibotid || "";  // 机器人 ID
+
+            // 解析引用消息（可选）
+            const quote = data.quote ? {
+                msgType: data.quote.msgtype,
+                content: data.quote.text?.content || data.quote.image?.url || "",
+            } : null;
 
             // Check for duplicates
             if (this.deduplicator.isDuplicate(msgId)) {
@@ -148,7 +157,12 @@ export class WxWorkWebhook {
                 return null;
             }
 
-            logger.info("Received text message", { fromUser, content: content.substring(0, 50) });
+            logger.info("Received text message", {
+                fromUser,
+                chatType,
+                chatId: chatId || "(private)",
+                content: content.substring(0, 50)
+            });
 
             return {
                 message: {
@@ -156,8 +170,11 @@ export class WxWorkWebhook {
                     msgType: "text",
                     content,
                     fromUser,
-                    chatType: data.chattype || "single",  // Note: "chattype" not "chatinfo.chattype"
-                    responseUrl,  // For async response
+                    chatType,
+                    chatId,        // 群聊 ID
+                    aibotId,       // 机器人 ID
+                    quote,         // 引用消息
+                    responseUrl,   // For async response
                 },
                 query: { timestamp, nonce },
             };
