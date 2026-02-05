@@ -805,9 +805,45 @@ async function deliverWecomReply({ payload, account, responseUrl, senderId, stre
     senderId,
   });
 
+  // 处理绝对路径的 MEDIA: 行（OpenClaw 会拒绝它们，所以我们需要手动处理）
+  const mediaRegex = /^MEDIA:\s*(.+)$/gm;
+  const mediaMatches = [];
+  let match;
+  while ((match = mediaRegex.exec(text)) !== null) {
+    const mediaPath = match[1].trim();
+    // 检查是否是绝对路径（以 / 开头）
+    if (mediaPath.startsWith("/")) {
+      mediaMatches.push({
+        fullMatch: match[0],
+        path: mediaPath
+      });
+      logger.debug("Detected absolute path MEDIA line", {
+        streamId,
+        mediaPath,
+        line: match[0]
+      });
+    }
+  }
+
+  // 如果检测到绝对路径的 MEDIA 行，将图片加入队列并从文本中移除
+  let processedText = text;
+  if (mediaMatches.length > 0 && streamId) {
+    for (const media of mediaMatches) {
+      const queued = streamManager.queueImage(streamId, media.path);
+      if (queued) {
+        // 从文本中移除这行
+        processedText = processedText.replace(media.fullMatch, "").trim();
+        logger.info("Queued absolute path image for stream", {
+          streamId,
+          imagePath: media.path
+        });
+      }
+    }
+  }
+
   // 所有消息都通过流式发送
-  if (!text.trim()) {
-    logger.debug("WeCom: empty block, skipping stream update");
+  if (!processedText.trim()) {
+    logger.debug("WeCom: empty block after processing, skipping stream update");
     return;
   }
 
@@ -834,10 +870,10 @@ async function deliverWecomReply({ payload, account, responseUrl, senderId, stre
     // 尝试从 activeStreams 获取
     const activeStreamId = activeStreams.get(senderId);
     if (activeStreamId && streamManager.hasStream(activeStreamId)) {
-      appendToStream(activeStreamId, text);
+      appendToStream(activeStreamId, processedText);
       logger.debug("WeCom stream appended (via activeStreams)", {
         streamId: activeStreamId,
-        contentLength: text.length,
+        contentLength: processedText.length,
       });
       return;
     }
@@ -850,10 +886,10 @@ async function deliverWecomReply({ payload, account, responseUrl, senderId, stre
     return;
   }
 
-  appendToStream(streamId, text);
+  appendToStream(streamId, processedText);
   logger.debug("WeCom stream appended", {
     streamId,
-    contentLength: text.length,
+    contentLength: processedText.length,
     to: senderId
   });
 }
