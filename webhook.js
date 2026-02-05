@@ -209,6 +209,42 @@ export class WecomWebhook {
                 query: { timestamp, nonce },
             };
         }
+        else if (msgtype === "voice") {
+            // Voice message (single chat only) - WeCom automatically transcribes to text
+            const content = data.voice?.content || "";
+            const msgId = data.msgid || `msg_${Date.now()}`;
+            const fromUser = data.from?.userid || "";
+            const responseUrl = data.response_url || "";
+            const chatType = data.chattype || "single";
+            const chatId = data.chatid || "";
+
+            // Check for duplicates
+            if (this.deduplicator.isDuplicate(msgId)) {
+                logger.debug("Duplicate voice message ignored", { msgId });
+                return null;
+            }
+
+            logger.info("Received voice message (transcribed)", {
+                fromUser,
+                chatType,
+                chatId: chatId || "(private)",
+                content: content.substring(0, 50)
+            });
+
+            // Treat voice as text since WeCom already transcribed it
+            return {
+                message: {
+                    msgId,
+                    msgType: "text",
+                    content,
+                    fromUser,
+                    chatType,
+                    chatId,
+                    responseUrl,
+                },
+                query: { timestamp, nonce },
+            };
+        }
         else if (msgtype === "event") {
             logger.info("Received event", { event: data.event });
             return {

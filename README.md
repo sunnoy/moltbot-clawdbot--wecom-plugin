@@ -9,6 +9,7 @@
 - 🌊 **Streaming Output**: Built on WeCom's latest AI bot streaming mechanism for smooth typewriter-style responses.
 - 🤖 **Dynamic Agent Management**: Automatically creates isolated agents per direct message user or group chat, with independent workspaces and conversation contexts.
 - 👥 **Deep Group Chat Integration**: Supports group message parsing with @mention triggering.
+- 🎤 **Voice Message Support**: Automatically processes voice messages transcribed by WeCom into text for AI interaction (direct messages only).
 - 🖼️ **Image Support**: Automatic base64 encoding and sending of local images (screenshots, generated images) without requiring additional configuration.
 - 🛠️ **Command Enhancement**: Built-in commands (e.g., `/new` for new sessions, `/status` for status) with allowlist configuration.
 - 🔒 **Security & Authentication**: Full support for WeCom message encryption/decryption, URL verification, and sender validation.
@@ -215,6 +216,10 @@ AI: [Takes screenshot] → Image displays properly in WeCom ✅
 ```
 
 If an image fails to process (size limit, invalid format), the text response will still be delivered and an error will be logged.
+
+### Q: Does the bot support voice messages?
+
+**A:** Yes! Voice messages in direct chats are automatically transcribed by WeCom and processed as text. No additional configuration needed.
 
 ### Q: How to configure auth token for public-facing OpenClaw with WeCom callbacks?
 
