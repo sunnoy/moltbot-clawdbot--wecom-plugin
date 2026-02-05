@@ -41,7 +41,6 @@ Add to your OpenClaw configuration file (`~/.openclaw/openclaw.json`):
 ```json
 {
   "plugins": {
-    "deny": ["wecom"],
     "entries": {
       "openclaw-plugin-wecom": {
         "enabled": true
@@ -66,7 +65,6 @@ Add to your OpenClaw configuration file (`~/.openclaw/openclaw.json`):
 
 | Option | Type | Required | Description |
 |--------|------|----------|-------------|
-| `plugins.deny` | array | Recommended | Add `["wecom"]` to prevent OpenClaw from auto-enabling built-in channel |
 | `plugins.entries.openclaw-plugin-wecom.enabled` | boolean | Yes | Enable the plugin |
 | `channels.wecom.token` | string | Yes | WeCom bot Token |
 | `channels.wecom.encodingAesKey` | string | Yes | WeCom message encryption key (43 chars) |
@@ -193,24 +191,15 @@ Prevent regular users from executing sensitive Gateway management commands throu
 }
 ```
 
-### Q: Why does `openclaw doctor` keep reporting "wecom configured, not enabled yet"?
+### Q: Why does `openclaw doctor` report warnings?
 
-**A:** Add `"deny": ["wecom"]` to your `plugins` configuration:
+**A:** If you see configuration warnings, run:
 
-```json
-{
-  "plugins": {
-    "deny": ["wecom"],
-    "entries": {
-      "openclaw-plugin-wecom": {
-        "enabled": true
-      }
-    }
-  }
-}
+```bash
+openclaw doctor --fix
 ```
 
-**Reason:** OpenClaw tries to auto-enable built-in channel configurations with the id `wecom`. Adding `deny` prevents this auto-enablement, ensuring only the `openclaw-plugin-wecom` plugin is used.
+This will automatically fix common configuration issues.
 
 ### Q: How does image sending work?
 

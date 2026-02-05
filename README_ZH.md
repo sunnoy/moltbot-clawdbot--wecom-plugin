@@ -41,7 +41,6 @@ npm install openclaw-plugin-wecom
 ```json
 {
   "plugins": {
-    "deny": ["wecom"],
     "entries": {
       "openclaw-plugin-wecom": {
         "enabled": true
@@ -66,7 +65,6 @@ npm install openclaw-plugin-wecom
 
 | 配置项 | 类型 | 必填 | 说明 |
 |--------|------|------|------|
-| `plugins.deny` | array | 推荐 | 添加 `["wecom"]` 防止 OpenClaw 自动启用内置 channel |
 | `plugins.entries.openclaw-plugin-wecom.enabled` | boolean | 是 | 启用插件 |
 | `channels.wecom.token` | string | 是 | 企业微信机器人 Token |
 | `channels.wecom.encodingAesKey` | string | 是 | 企业微信消息加密密钥（43 位） |
@@ -193,24 +191,15 @@ npm install openclaw-plugin-wecom
 }
 ```
 
-### Q: 为什么 `openclaw doctor` 一直报错 "wecom configured, not enabled yet"？
+### Q: 为什么 `openclaw doctor` 报告警告？
 
-**A:** 需要在 `plugins` 配置中添加 `"deny": ["wecom"]`：
+**A:** 如果看到配置警告，运行：
 
-```json
-{
-  "plugins": {
-    "deny": ["wecom"],
-    "entries": {
-      "openclaw-plugin-wecom": {
-        "enabled": true
-      }
-    }
-  }
-}
+```bash
+openclaw doctor --fix
 ```
 
-**原因：** OpenClaw 会尝试自动启用 channel id 为 `wecom` 的内置插件配置，添加 `deny` 可以防止这种自动启用，确保只使用 `openclaw-plugin-wecom` 插件。
+这会自动修复常见的配置问题。
 
 ### Q: 图片发送是如何工作的？
 
