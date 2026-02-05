@@ -224,11 +224,19 @@ export class WecomWebhook {
                 return null;
             }
 
-            logger.info("Received voice message (transcribed)", {
+            // Validate content
+            if (!content.trim()) {
+                logger.warn("Empty voice message received", { msgId, fromUser });
+                return null;
+            }
+
+            logger.info("Received voice message (auto-transcribed by WeCom)", {
                 fromUser,
                 chatType,
                 chatId: chatId || "(private)",
-                content: content.substring(0, 50)
+                originalType: "voice",
+                transcribedLength: content.length,
+                preview: content.substring(0, 50)
             });
 
             // Treat voice as text since WeCom already transcribed it
