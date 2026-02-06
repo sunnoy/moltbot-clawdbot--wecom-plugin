@@ -144,28 +144,49 @@ async function downloadAndDecryptImage(imageUrl, encodingAesKey, token) {
 }
 
 /**
- * Download a file from WeCom (not encrypted, unlike images).
+ * Download and decrypt a file from WeCom.
+ * Note: WeCom encrypts ALL media files (not just images) with AES-256-CBC.
  * @param {string} fileUrl - File download URL
  * @param {string} fileName - Original file name
- * @returns {Promise<string>} Local path to downloaded file
+ * @param {string} encodingAesKey - AES key for decryption
+ * @param {string} token - Token for decryption
+ * @returns {Promise<string>} Local path to decrypted file
  */
-async function downloadWecomFile(fileUrl, fileName) {
+async function downloadWecomFile(fileUrl, fileName, encodingAesKey, token) {
   if (!existsSync(MEDIA_CACHE_DIR)) {
     mkdirSync(MEDIA_CACHE_DIR, { recursive: true });
   }
 
-  logger.info("Downloading file", { url: fileUrl.substring(0, 80), name: fileName });
+  logger.info("Downloading encrypted file", { url: fileUrl.substring(0, 80), name: fileName });
   const response = await fetch(fileUrl);
   if (!response.ok) {
     throw new Error(`Failed to download file: ${response.status}`);
   }
-  const buffer = Buffer.from(await response.arrayBuffer());
+  const encryptedBuffer = Buffer.from(await response.arrayBuffer());
 
-  const safeName = (fileName || `file_${Date.now()}`).replace(/[/\\:*?"<>|]/g, "_");
+  // Try to extract filename from Content-Disposition header if not provided
+  let effectiveFileName = fileName;
+  if (!effectiveFileName) {
+    const contentDisposition = response.headers.get("content-disposition");
+    if (contentDisposition) {
+      // Match: filename="xxx.pdf" or filename*=UTF-8''xxx.pdf
+      const filenameMatch = contentDisposition.match(/filename\*?=(?:UTF-8'')?["']?([^"';\n]+)["']?/i);
+      if (filenameMatch && filenameMatch[1]) {
+        effectiveFileName = decodeURIComponent(filenameMatch[1]);
+        logger.info("Extracted filename from Content-Disposition", { name: effectiveFileName });
+      }
+    }
+  }
+
+  // Decrypt the file (WeCom encrypts all media the same way as images)
+  const wecomCrypto = new WecomCrypto(token, encodingAesKey);
+  const decryptedBuffer = wecomCrypto.decryptMedia(encryptedBuffer);
+
+  const safeName = (effectiveFileName || `file_${Date.now()}`).replace(/[/\\:*?"<>|]/g, "_");
   const localPath = join(MEDIA_CACHE_DIR, `${Date.now()}_${safeName}`);
-  writeFileSync(localPath, buffer);
+  writeFileSync(localPath, decryptedBuffer);
 
-  logger.info("File downloaded and saved", { path: localPath, size: buffer.length });
+  logger.info("File decrypted and saved", { path: localPath, size: decryptedBuffer.length });
   return localPath;
 }
 
@@ -1392,7 +1413,7 @@ async function processInboundMessage({
   // Handle file attachment.
   if (fileUrl) {
     try {
-      const localFilePath = await downloadWecomFile(fileUrl, fileName);
+      const localFilePath = await downloadWecomFile(fileUrl, fileName, account.encodingAesKey, account.token);
       ctxBase.MediaPaths = [...(ctxBase.MediaPaths || []), localFilePath];
       ctxBase.MediaTypes = [...(ctxBase.MediaTypes || []), guessMimeType(fileName)];
       logger.info("File attachment prepared", { path: localFilePath, name: fileName });
