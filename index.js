@@ -1,9 +1,15 @@
 import { WecomWebhook } from "./webhook.js";
+import { WecomCrypto } from "./crypto.js";
 import { logger } from "./logger.js";
 import { streamManager } from "./stream-manager.js";
+import { createWriteStream, mkdirSync, existsSync } from "node:fs";
+import { pipeline } from "node:stream/promises";
+import { join } from "node:path";
 import {
   generateAgentId,
   getDynamicAgentConfig,
+  shouldUseDynamicAgent,
+  isMainUser,
   shouldTriggerGroupResponse,
   extractGroupMessageContent,
 } from "./dynamic-agent.js";
@@ -22,6 +28,59 @@ const DEFAULT_COMMAND_ALLOWLIST = [
   "/help",    // 帮助
   "/status",  // 状态
 ];
+
+// 图片缓存目录
+const MEDIA_CACHE_DIR = join(process.env.HOME || "/tmp", ".openclaw", "media", "wecom");
+
+/**
+ * 下载并解密企业微信图片
+ * @param {string} imageUrl - 加密图片的 URL
+ * @param {string} encodingAesKey - AES 密钥
+ * @param {string} token - Token
+ * @returns {Promise<string>} - 解密后图片的本地路径
+ */
+async function downloadAndDecryptImage(imageUrl, encodingAesKey, token) {
+  try {
+    // 确保缓存目录存在
+    if (!existsSync(MEDIA_CACHE_DIR)) {
+      mkdirSync(MEDIA_CACHE_DIR, { recursive: true });
+    }
+
+    // 下载加密图片
+    logger.info("Downloading encrypted image", { url: imageUrl.substring(0, 80) + "..." });
+    const response = await fetch(imageUrl);
+    if (!response.ok) {
+      throw new Error(`Failed to download image: ${response.status}`);
+    }
+    const encryptedBuffer = Buffer.from(await response.arrayBuffer());
+    logger.debug("Downloaded encrypted image", { size: encryptedBuffer.length });
+
+    // 解密图片
+    const crypto = new WecomCrypto(token, encodingAesKey);
+    const decryptedBuffer = crypto.decryptMedia(encryptedBuffer);
+
+    // 检测图片类型
+    let ext = "jpg";
+    if (decryptedBuffer[0] === 0x89 && decryptedBuffer[1] === 0x50) {
+      ext = "png";
+    } else if (decryptedBuffer[0] === 0x47 && decryptedBuffer[1] === 0x49) {
+      ext = "gif";
+    }
+
+    // 保存到本地
+    const filename = `wecom_${Date.now()}_${Math.random().toString(36).substring(2, 8)}.${ext}`;
+    const localPath = join(MEDIA_CACHE_DIR, filename);
+    
+    const { writeFileSync } = await import("node:fs");
+    writeFileSync(localPath, decryptedBuffer);
+    
+    logger.info("Image decrypted and saved", { path: localPath, size: decryptedBuffer.length });
+    return localPath;
+  } catch (e) {
+    logger.error("Failed to download/decrypt image", { error: e.message });
+    throw e;
+  }
+}
 
 // 默认拦截消息
 const DEFAULT_COMMAND_BLOCK_MESSAGE = `⚠️ 该命令不可用。
@@ -765,6 +824,9 @@ async function processInboundMessage({ message, streamId, timestamp, nonce, acco
   const core = runtime.channel;
 
   const senderId = message.fromUser;
+  const msgType = message.msgType || "text";
+  const imageUrl = message.imageUrl || "";
+  // For image messages, content might be empty - we'll handle it via MediaUrls
   const rawContent = message.content || "";
   const responseUrl = message.responseUrl;
   const chatType = message.chatType || "single";  // "single" 或 "group"
@@ -800,7 +862,8 @@ async function processInboundMessage({ message, streamId, timestamp, nonce, acco
     senderId,
   });
 
-  if (!rawBody.trim()) {
+  // Skip empty messages, but allow image-only messages
+  if (!rawBody.trim() && !imageUrl) {
     logger.debug("WeCom: empty message, skipping");
     return;
   }
@@ -841,15 +904,23 @@ async function processInboundMessage({ message, streamId, timestamp, nonce, acco
   // ========================================================================
   // 动态 Agent 逻辑（极简版）
   // 只需要生成 agentId 和构造 SessionKey，OpenClaw 会自动创建 workspace
+  // 
+  // 支持 mainUsers 配置：在列表中的用户不走动态 Agent，直接路由到 main
   // ========================================================================
-  const dynamicConfig = getDynamicAgentConfig(config);
+  const useDynamicAgent = shouldUseDynamicAgent({ 
+    chatType: peerKind, 
+    userId: senderId, 
+    config 
+  });
 
-  // 生成目标 AgentId
-  const targetAgentId = dynamicConfig.enabled ? generateAgentId(peerKind, peerId) : null;
+  // 生成目标 AgentId（仅当需要动态 Agent 时）
+  const targetAgentId = useDynamicAgent ? generateAgentId(peerKind, peerId) : null;
 
   if (targetAgentId) {
     await ensureDynamicAgentListed(targetAgentId);
     logger.debug("Using dynamic agent", { agentId: targetAgentId, chatType: peerKind, peerId });
+  } else if (isMainUser(senderId, config)) {
+    logger.info("Main user detected, routing to main agent", { userId: senderId });
   }
 
   // ========================================================================
@@ -893,7 +964,8 @@ async function processInboundMessage({ message, streamId, timestamp, nonce, acco
     body: rawBody,
   });
 
-  const ctxPayload = core.reply.finalizeInboundContext({
+  // Build context payload with optional image attachment
+  const ctxBase = {
     Body: body,
     RawBody: rawBody,
     CommandBody: rawBody,
@@ -911,7 +983,34 @@ async function processInboundMessage({ message, streamId, timestamp, nonce, acco
     OriginatingChannel: "wecom",
     OriginatingTo: conversationId,
     CommandAuthorized: commandAuthorized,
-  });
+  };
+
+  // Add image attachment if present - download, decrypt, and save locally
+  if (imageUrl) {
+    try {
+      const localImagePath = await downloadAndDecryptImage(
+        imageUrl, 
+        account.encodingAesKey, 
+        account.token
+      );
+      ctxBase.MediaPaths = [localImagePath];
+      ctxBase.MediaTypes = ["image/jpeg"];
+      logger.info("Image attachment prepared", { path: localImagePath });
+    } catch (e) {
+      // Fallback to URL if decryption fails
+      logger.warn("Image decryption failed, using URL fallback", { error: e.message });
+      ctxBase.MediaUrls = [imageUrl];
+      ctxBase.MediaTypes = ["image/jpeg"];
+    }
+    // For image-only messages, set a placeholder body
+    if (!message.content?.trim()) {
+      ctxBase.Body = "[用户发送了一张图片]";
+      ctxBase.RawBody = "[图片]";
+      ctxBase.CommandBody = "";
+    }
+  }
+
+  const ctxPayload = core.reply.finalizeInboundContext(ctxBase);
 
   // Record session meta
   void core.session.recordSessionMetaFromInbound({

@@ -37,6 +37,9 @@ export function getDynamicAgentConfig(config) {
     const wecom = config?.channels?.wecom || {};
     return {
         enabled: wecom.dynamicAgents?.enabled !== false,
+        
+        // 主账号列表（这些用户不走动态 Agent，直接路由到 main）
+        mainUsers: wecom.dynamicAgents?.mainUsers || [],
 
         // 私聊配置
         dmCreateAgent: wecom.dm?.createAgentOnFirstMessage !== false,
@@ -51,17 +54,43 @@ export function getDynamicAgentConfig(config) {
 }
 
 /**
+ * 检查用户是否在主账号列表中（不走动态 Agent）
+ * 
+ * @param {string} userId - 用户ID
+ * @param {Object} config - openclaw 配置
+ * @returns {boolean}
+ */
+export function isMainUser(userId, config) {
+    const dynamicConfig = getDynamicAgentConfig(config);
+    const mainUsers = dynamicConfig.mainUsers;
+    
+    if (!Array.isArray(mainUsers) || mainUsers.length === 0) {
+        return false;
+    }
+    
+    const normalizedUserId = String(userId).toLowerCase().trim();
+    return mainUsers.some(u => String(u).toLowerCase().trim() === normalizedUserId);
+}
+
+/**
  * 检查是否应该为此消息创建/使用动态 Agent
  * 
  * @param {Object} options
  * @param {string} options.chatType - "dm" 或 "group"
+ * @param {string} options.userId - 发送者用户ID
  * @param {Object} options.config - openclaw 配置
  * @returns {boolean}
  */
-export function shouldUseDynamicAgent({ chatType, config }) {
+export function shouldUseDynamicAgent({ chatType, userId, config }) {
     const dynamicConfig = getDynamicAgentConfig(config);
 
     if (!dynamicConfig.enabled) {
+        return false;
+    }
+    
+    // 主账号列表中的用户不走动态 Agent
+    if (userId && isMainUser(userId, config)) {
+        logger.info("User in mainUsers list, skipping dynamic agent", { userId });
         return false;
     }
 

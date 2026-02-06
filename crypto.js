@@ -95,6 +95,52 @@ export class WecomCrypto {
         }
         return buff.subarray(0, buff.length - pad);
     }
+
+    /**
+     * Decrypt image/media file from Enterprise WeChat
+     * Images are encrypted with AES-256-CBC using the same key as messages
+     * Note: WeCom uses PKCS7 padding to 32-byte blocks (not standard 16-byte)
+     * @param {Buffer} encryptedData - The encrypted image data (raw bytes, not base64)
+     * @returns {Buffer} - Decrypted image data
+     */
+    decryptMedia(encryptedData) {
+        try {
+            const decipher = createDecipheriv("aes-256-cbc", this.aesKey, this.iv);
+            // Disable auto padding - WeCom uses 32-byte block padding, not standard 16
+            decipher.setAutoPadding(false);
+            const decrypted = Buffer.concat([
+                decipher.update(encryptedData),
+                decipher.final()
+            ]);
+            
+            // Remove PKCS7 padding manually (padded to 32-byte blocks)
+            const padLen = decrypted[decrypted.length - 1];
+            let unpadded = decrypted;
+            if (padLen >= 1 && padLen <= 32) {
+                // Verify padding bytes are consistent
+                let validPadding = true;
+                for (let i = decrypted.length - padLen; i < decrypted.length; i++) {
+                    if (decrypted[i] !== padLen) {
+                        validPadding = false;
+                        break;
+                    }
+                }
+                if (validPadding) {
+                    unpadded = decrypted.subarray(0, decrypted.length - padLen);
+                }
+            }
+            
+            logger.debug("Media decrypted successfully", { 
+                inputSize: encryptedData.length, 
+                outputSize: unpadded.length,
+                paddingRemoved: padLen
+            });
+            return unpadded;
+        } catch (e) {
+            logger.error("Media decryption failed", { error: e.message });
+            throw new Error(`Media decryption failed: ${e.message}`);
+        }
+    }
 }
 
 export const xmlParser = new XMLParser({
