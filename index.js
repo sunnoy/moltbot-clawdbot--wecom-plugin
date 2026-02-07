@@ -359,6 +359,13 @@ const webhookTargets = new Map();
 const activeStreams = new Map();
 const activeStreamHistory = new Map();
 
+// Store stream metadata for delayed finish (main response done flag)
+const streamMeta = new Map();
+
+// Store response_url for fallback delivery after stream closes
+// response_url is valid for 1 hour and can be used only once
+const responseUrls = new Map();
+
 // AsyncLocalStorage for propagating the correct streamId through the async
 // processing chain. Prevents outbound adapter from resolving the wrong stream
 // when multiple messages from the same user are in flight.
@@ -707,7 +714,8 @@ const wecomChannelPlugin = {
       const ctx = streamContext.getStore();
       const streamId = ctx?.streamId ?? resolveActiveStream(userId);
 
-      if (streamId && streamManager.hasStream(streamId)) {
+      // Layer 1: Active stream (normal path)
+      if (streamId && streamManager.hasStream(streamId) && !streamManager.getStream(streamId)?.finished) {
         logger.debug("Appending outbound text to stream", {
           userId,
           streamId,
@@ -723,8 +731,29 @@ const wecomChannelPlugin = {
         };
       }
 
-      // No active stream means nothing can be delivered right now.
-      logger.warn("WeCom outbound: no active stream for user", { userId });
+      // Layer 2: Fallback via response_url
+      // response_url is valid for 1 hour and can be used only once.
+      const saved = responseUrls.get(userId);
+      if (saved && !saved.used && Date.now() < saved.expiresAt) {
+        saved.used = true;
+        try {
+          await fetch(saved.url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ msgtype: 'text', text: { content: text } }),
+          });
+          logger.info("WeCom: sent via response_url fallback", { userId });
+          return {
+            channel: "wecom",
+            messageId: `msg_response_url_${Date.now()}`,
+          };
+        } catch (err) {
+          logger.error("WeCom: response_url fallback failed", { userId, error: err.message });
+        }
+      }
+
+      // Layer 3: Log warning (extreme boundary case)
+      logger.warn("WeCom outbound: no delivery channel available (stream closed + response_url unavailable)", { userId });
 
       return {
         channel: "wecom",
@@ -1019,6 +1048,23 @@ async function wecomHttpHandler(req, res) {
         return true;
       }
 
+      // Check if stream should be closed (main response done + idle timeout).
+      // This is driven by WeCom client polling, so it's more reliable than setTimeout.
+      const meta = streamMeta.get(streamId);
+      if (meta?.mainResponseDone && !stream.finished) {
+        const idleMs = Date.now() - stream.updatedAt;
+        // Close if idle for > 10s after main response done.
+        // WeCom polling continues for up to 6 minutes, so 10s is conservative.
+        if (idleMs > 10000) {
+          logger.info("WeCom: closing stream due to idle timeout", { streamId, idleMs });
+          try {
+            await streamManager.finishStream(streamId);
+          } catch (err) {
+            logger.error("WeCom: failed to finish stream", { streamId, error: err.message });
+          }
+        }
+      }
+
       // Return current stream payload.
       const streamResponse = webhook.buildStreamResponse(
         streamId,
@@ -1208,6 +1254,17 @@ async function processInboundMessage({
   const streamKey = isGroupChat ? chatId : senderId;
   if (streamId) {
     registerActiveStream(streamKey, streamId);
+  }
+
+  // Save response_url for fallback delivery after stream closes.
+  // response_url is valid for 1 hour and can be used only once.
+  if (message.responseUrl && message.responseUrl.trim()) {
+    responseUrls.set(streamKey, {
+      url: message.responseUrl,
+      expiresAt: Date.now() + 60 * 60 * 1000, // 1 hour
+      used: false,
+    });
+    logger.debug("WeCom: saved response_url for fallback", { streamKey });
   }
 
   // Apply group mention gating rules.
@@ -1472,17 +1529,15 @@ async function processInboundMessage({
               streamId,
             });
 
-            // Mark stream complete on final payload.
-            // Delay closing stream to allow outbound messages (e.g., subagent notifications)
-            // time to be delivered before stream is finalized.
+            // Mark stream meta when main response is done.
+            // Actual stream finish is deferred to stream refresh handler,
+            // which is driven by WeCom client polling.
             if (streamId && info.kind === "final") {
-              setTimeout(async () => {
-                if (streamManager.hasStream(streamId)) {
-                  await streamManager.finishStream(streamId);
-                  unregisterActiveStream(streamKey, streamId);
-                  logger.info("WeCom stream finished (delayed)", { streamId });
-                }
-              }, 5000); // 5 second delay for outbound messages
+              streamMeta.set(streamId, {
+                mainResponseDone: true,
+                doneAt: Date.now(),
+              });
+              logger.info("WeCom main response complete, keeping stream open for late messages", { streamId });
             }
           },
           onError: async (err, info) => {
@@ -1494,16 +1549,32 @@ async function processInboundMessage({
     });
 
     // Safety net: ensure stream finishes after dispatch.
-    // Note: Stream closing is delayed in dispatcher callback to allow outbound messages.
-    // This safety net only closes streams that weren't properly finalized.
+    // Note: Stream closing is now handled by stream refresh handler via WeCom polling.
+    // This safety net only cleans up if refresh handler never fires (edge case).
     if (streamId) {
       const stream = streamManager.getStream(streamId);
       if (!stream || stream.finished) {
         unregisterActiveStream(streamKey, streamId);
       } else {
-        // Only close if already finished or stream manager indicates done.
-        // Let the delayed close in dispatcher handle most cases.
-        logger.debug("WeCom safety net: skipping auto-close (delayed close in dispatcher)", { streamId });
+        // Stream is still open; refresh handler will close it when idle.
+        // Add a safety timeout to prevent leaks if refresh never fires.
+        setTimeout(async () => {
+          const checkStream = streamManager.getStream(streamId);
+          if (checkStream && !checkStream.finished) {
+            const meta = streamMeta.get(streamId);
+            const idleMs = Date.now() - checkStream.updatedAt;
+            // Close if idle for > 30s (extreme fallback, refresh should handle this)
+            if (idleMs > 30000) {
+              logger.warn("WeCom safety net: closing idle stream", { streamId, idleMs });
+              try {
+                await streamManager.finishStream(streamId);
+                unregisterActiveStream(streamKey, streamId);
+              } catch (err) {
+                logger.error("WeCom safety net: failed to close stream", { streamId, error: err.message });
+              }
+            }
+          }
+        }, 35000); // 35s total timeout
       }
     }
   }).catch(async (err) => {
