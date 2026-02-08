@@ -1711,7 +1711,36 @@ async function deliverWecomReply({ payload, senderId, streamId }) {
   }
 
   if (!streamManager.hasStream(streamId)) {
-    logger.warn("WeCom: stream not found, cannot update", { streamId });
+    logger.warn("WeCom: stream not found, attempting response_url fallback", { streamId, senderId });
+
+    // Layer 2: Fallback via response_url (stream closed, but response_url may still be valid)
+    const saved = responseUrls.get(senderId);
+    if (saved && !saved.used && Date.now() < saved.expiresAt) {
+      saved.used = true;
+      try {
+        await fetch(saved.url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ msgtype: 'text', text: { content: processedText } }),
+        });
+        logger.info("WeCom: sent via response_url fallback (deliverWecomReply)", {
+          senderId,
+          contentPreview: processedText.substring(0, 50),
+        });
+        return;
+      } catch (err) {
+        logger.error("WeCom: response_url fallback failed", {
+          senderId,
+          error: err.message,
+        });
+      }
+    }
+
+    // Layer 3: Log warning (extreme boundary case)
+    logger.warn("WeCom: unable to deliver message (stream closed + response_url unavailable)", {
+      senderId,
+      contentPreview: processedText.substring(0, 50),
+    });
     return;
   }
 
