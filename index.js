@@ -366,6 +366,23 @@ const streamMeta = new Map();
 // response_url is valid for 1 hour and can be used only once
 const responseUrls = new Map();
 
+// Periodic cleanup for streamMeta and expired responseUrls to prevent memory leaks.
+setInterval(() => {
+  const now = Date.now();
+  // Clean streamMeta entries whose stream no longer exists in streamManager.
+  for (const streamId of streamMeta.keys()) {
+    if (!streamManager.hasStream(streamId)) {
+      streamMeta.delete(streamId);
+    }
+  }
+  // Clean expired responseUrls (older than 1 hour).
+  for (const [key, entry] of responseUrls.entries()) {
+    if (now > entry.expiresAt) {
+      responseUrls.delete(key);
+    }
+  }
+}, 60 * 1000).unref();
+
 // AsyncLocalStorage for propagating the correct streamId through the async
 // processing chain. Prevents outbound adapter from resolving the wrong stream
 // when multiple messages from the same user are in flight.
@@ -733,7 +750,8 @@ const wecomChannelPlugin = {
 
       // Layer 2: Fallback via response_url
       // response_url is valid for 1 hour and can be used only once.
-      const saved = responseUrls.get(userId);
+      // responseUrls is keyed by streamKey (fromUser for DM, chatId for group).
+      const saved = responseUrls.get(ctx?.streamKey ?? userId);
       if (saved && !saved.used && Date.now() < saved.expiresAt) {
         saved.used = true;
         try {
@@ -1089,6 +1107,7 @@ async function wecomHttpHandler(req, res) {
       if (stream.finished) {
         setTimeout(() => {
           streamManager.deleteStream(streamId);
+          streamMeta.delete(streamId);
         }, 30 * 1000);
       }
 
