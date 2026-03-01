@@ -49,6 +49,17 @@ export function setEnsureDynamicAgentWriteQueue(queuePromise) {
 }
 
 /**
+ * 替换配置值中的环境变量占位符 ${VAR}
+ */
+function resolveEnvVars(value) {
+  if (typeof value !== 'string') return value;
+  return value.replace(/\$\{([^}]+)\}/g, (match, envVar) => {
+    return process.env[envVar] || match;
+  });
+}
+
+
+/**
  * Extract Agent API config from the runtime openclaw config.
  * Returns null when Agent mode is not configured.
  */
@@ -56,6 +67,13 @@ export function resolveAgentConfig() {
   const config = getOpenclawConfig();
   const wecom = config?.channels?.wecom;
   const agent = wecom?.agent;
+
+  // 替换环境变量占位符
+  const corpId = resolveEnvVars(agent?.corpId);
+  const corpSecret = resolveEnvVars(agent?.corpSecret);
+  const agentId = resolveEnvVars(agent?.agentId);
+  
+  
   if (!agent?.corpId || !agent?.corpSecret || !agent?.agentId) return null;
   return {
     corpId: agent.corpId,
