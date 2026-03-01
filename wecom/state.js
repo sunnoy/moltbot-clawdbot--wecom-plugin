@@ -65,16 +65,6 @@ export function resolveAgentConfig() {
 }
 
 /**
- * 替换配置值中的环境变量占位符 ${VAR}
- */
-function resolveEnvVars(value) {
-  if (typeof value !== 'string') return value;
-  return value.replace(/\$\{([^}]+)\}/g, (match, envVar) => {
-    return process.env[envVar] || match;
-  });
-}
-
-/**
  * Resolve a webhook name to a full webhook URL.
  * Supports both full URLs and bare keys in config.
  * Returns null when the webhook name is not configured.
@@ -82,20 +72,11 @@ function resolveEnvVars(value) {
  * @param {string} name - Webhook name from the `to` field (e.g. "ops-group")
  * @returns {string|null}
  */
-export function resolveAgentConfig() {
+export function resolveWebhookUrl(name) {
   const config = getOpenclawConfig();
-  const wecom = config?.channels?.wecom;
-  const agent = wecom?.agent;
-  
-  // 替换环境变量占位符
-  const corpId = resolveEnvVars(agent?.corpId);
-  const corpSecret = resolveEnvVars(agent?.corpSecret);
-  const agentId = resolveEnvVars(agent?.agentId);
-  
-  if (!corpId || !corpSecret || !agentId) return null;
-  return {
-    corpId,
-    corpSecret,
-    agentId: parseInt(agentId, 10),
-  };
+  const webhooks = config?.channels?.wecom?.webhooks;
+  if (!webhooks || !webhooks[name]) return null;
+  const value = webhooks[name];
+  if (value.startsWith("http")) return value;
+  return `${WEBHOOK_BOT_SEND_URL}?key=${value}`;
 }
