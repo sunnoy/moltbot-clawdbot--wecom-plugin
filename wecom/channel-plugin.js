@@ -375,6 +375,67 @@ export const wecomChannelPlugin = {
             }
           }
 
+          const fileFilename = basename(absolutePath);
+          const fileExt = fileFilename.split(".").pop()?.toLowerCase() || "";
+          const streamImageExts = new Set(["jpg", "jpeg", "png", "gif", "bmp"]);
+
+          if (!streamImageExts.has(fileExt)) {
+            // Non-image file: WeCom Bot stream API does not support files.
+            // Send via Agent DM and post a hint in the group stream.
+            logger.debug("Non-image file in active stream, routing via Agent DM", {
+              userId,
+              streamId,
+              absolutePath,
+              fileExt,
+            });
+            const agentCfgForFile = resolveAgentConfig();
+            if (agentCfgForFile) {
+              try {
+                const fileBuf = await readFile(absolutePath);
+                const fileMediaId = await agentUploadMedia({
+                  agent: agentCfgForFile,
+                  type: "file",
+                  buffer: fileBuf,
+                  filename: fileFilename,
+                });
+                await agentSendMedia({
+                  agent: agentCfgForFile,
+                  toUser: userId,
+                  mediaId: fileMediaId,
+                  mediaType: "file",
+                });
+                const fileHint = text
+                  ? `${text}\n\n📎 文件已通过私信发送给您：${fileFilename}`
+                  : `📎 文件已通过私信发送给您：${fileFilename}`;
+                streamManager.replaceIfPlaceholder(streamId, fileHint, THINKING_PLACEHOLDER);
+                logger.info("WeCom: sent non-image file via Agent DM (active stream)", {
+                  userId,
+                  filename: fileFilename,
+                });
+              } catch (fileErr) {
+                logger.error("WeCom: Agent DM file send failed (active stream)", {
+                  userId,
+                  filename: fileFilename,
+                  error: fileErr.message,
+                });
+                const errHint = text
+                  ? `${text}\n\n⚠️ 文件发送失败（${fileFilename}）：${fileErr.message}`
+                  : `⚠️ 文件发送失败（${fileFilename}）：${fileErr.message}`;
+                streamManager.replaceIfPlaceholder(streamId, errHint, THINKING_PLACEHOLDER);
+              }
+            } else {
+              // No Agent API configured — post a notice in stream.
+              const noAgentHint = text
+                ? `${text}\n\n⚠️ 无法发送文件 ${fileFilename}（未配置 Agent API）`
+                : `⚠️ 无法发送文件 ${fileFilename}（未配置 Agent API）`;
+              streamManager.replaceIfPlaceholder(streamId, noAgentHint, THINKING_PLACEHOLDER);
+            }
+            return {
+              channel: "wecom",
+              messageId: `msg_stream_file_${Date.now()}`,
+            };
+          }
+
           logger.debug("Queueing local image for stream", {
             userId,
             streamId,

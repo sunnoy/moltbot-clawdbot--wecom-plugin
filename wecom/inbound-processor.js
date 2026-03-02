@@ -14,14 +14,13 @@ import {
   isHighPriorityCommand,
   isWecomAdmin,
 } from "./commands.js";
-import { SAFETY_NET_IDLE_CLOSE_MS, THINKING_PLACEHOLDER } from "./constants.js";
+import { THINKING_PLACEHOLDER } from "./constants.js";
 import { downloadAndDecryptImage, downloadWecomFile, guessMimeType } from "./media.js";
 import { deliverWecomReply } from "./outbound-delivery.js";
 import {
   dispatchLocks,
   getRuntime,
   messageBuffers,
-  resolveAgentConfig,
   responseUrls,
   streamContext,
   streamMeta,
@@ -395,6 +394,38 @@ export async function processInboundMessage({
     });
 
   const runDispatch = async () => {
+    // --- Stream close coordination ---
+    // dispatchReplyWithBufferedBlockDispatcher may return before the LLM
+    // actually processes the message (e.g. when the session lane is busy and
+    // the message is queued).  We therefore track two signals:
+    //   1. dispatchDone  – the await on the dispatcher has resolved.
+    //   2. hadDelivery   – at least one deliver callback has fired.
+    // We only schedule a stream-close timer when BOTH are true, and we
+    // reset the timer on every new delivery so the stream stays open while
+    // content keeps arriving.
+    let dispatchDone = false;
+    let hadDelivery = false;
+    let closeTimer = null;
+
+    const scheduleStreamClose = () => {
+      if (closeTimer) clearTimeout(closeTimer);
+      closeTimer = setTimeout(async () => {
+        const s = streamManager.getStream(streamId);
+        if (s && !s.finished) {
+          logger.info("WeCom: finishing stream after dispatch complete", { streamId });
+          try {
+            await streamManager.finishStream(streamId);
+          } catch (err) {
+            logger.error("WeCom: failed to finish stream post-dispatch", {
+              streamId,
+              error: err.message,
+            });
+          }
+          unregisterActiveStream(streamKey, streamId);
+        }
+      }, 3000); // 3s grace after last delivery
+    };
+
     // Dispatch reply with AI processing.
     // Wrap in streamContext so outbound adapters resolve the correct stream.
     await streamContext.run({ streamId, streamKey }, async () => {
@@ -408,44 +439,39 @@ export async function processInboundMessage({
         },
         dispatcherOptions: {
           deliver: async (payload, info) => {
+            hadDelivery = true;
+
             logger.info("Dispatcher deliver called", {
               kind: info.kind,
               hasText: !!(payload.text && payload.text.trim()),
+              hasMediaUrl: !!(payload.mediaUrl || (payload.mediaUrls && payload.mediaUrls.length)),
               textPreview: (payload.text || "").substring(0, 50),
             });
 
-            await deliverWecomReply({
-              payload,
-              senderId: streamKey,
-              streamId,
-            });
+            try {
+              await deliverWecomReply({
+                payload,
+                senderId: streamKey,
+                streamId,
+              });
+            } catch (deliverErr) {
+              logger.error("WeCom: deliverWecomReply threw, continuing to finalize stream", {
+                streamId,
+                error: deliverErr.message,
+              });
+            }
 
             // Mark stream meta when main response is done.
-            // Actual stream finish is deferred to stream refresh handler,
-            // which is driven by WeCom client polling.
-            if (streamId && info.kind === "final") {
+            if (streamId && (info.kind === "final" || info.kind === "block")) {
               streamMeta.set(streamId, {
                 mainResponseDone: true,
                 doneAt: Date.now(),
               });
-              logger.info("WeCom main response complete, keeping stream open for late messages", { streamId });
+            }
 
-              // When Agent API is configured, late messages can be delivered
-              // via the Agent channel — no need to keep the stream open long.
-              const agentConfig = resolveAgentConfig();
-              if (agentConfig) {
-                setTimeout(async () => {
-                  const s = streamManager.getStream(streamId);
-                  if (s && !s.finished) {
-                    logger.info("WeCom: closing stream early (Agent API available for late messages)", { streamId });
-                    try {
-                      await streamManager.finishStream(streamId);
-                    } catch (err) {
-                      logger.error("WeCom: failed to close stream early", { streamId, error: err.message });
-                    }
-                  }
-                }, 3000);
-              }
+            // Schedule / reset stream close timer if dispatch already returned.
+            if (streamId && dispatchDone) {
+              scheduleStreamClose();
             }
           },
           onError: async (err, info) => {
@@ -456,36 +482,21 @@ export async function processInboundMessage({
       });
     });
 
-    // Safety net: ensure stream finishes after dispatch.
-    // Note: Stream closing is now handled by stream refresh handler via WeCom polling.
-    // This safety net only cleans up if refresh handler never fires (edge case).
+    // Dispatch returned.
+    dispatchDone = true;
+
     if (streamId) {
       const stream = streamManager.getStream(streamId);
       if (!stream || stream.finished) {
         unregisterActiveStream(streamKey, streamId);
-      } else {
-        // Stream is still open; refresh handler will close it when idle.
-        // Add a safety timeout to prevent leaks if refresh never fires.
-        setTimeout(async () => {
-          const checkStream = streamManager.getStream(streamId);
-          if (checkStream && !checkStream.finished) {
-            const idleMs = Date.now() - checkStream.updatedAt;
-            // Extreme fallback only: refresh handler should normally close earlier.
-            if (idleMs > SAFETY_NET_IDLE_CLOSE_MS) {
-              logger.warn("WeCom safety net: closing idle stream", { streamId, idleMs });
-              try {
-                await streamManager.finishStream(streamId);
-                unregisterActiveStream(streamKey, streamId);
-              } catch (err) {
-                logger.error("WeCom safety net: failed to close stream", {
-                  streamId,
-                  error: err.message,
-                });
-              }
-            }
-          }
-        }, 35000); // 35s total timeout
+      } else if (hadDelivery) {
+        // Normal case: content was already delivered, close after grace period.
+        scheduleStreamClose();
       }
+      // If !hadDelivery, the message was queued and is not yet processed.
+      // The deliver callback will fire later and schedule the close (since
+      // dispatchDone is now true).  The existing stream GC handles the edge
+      // case where no delivery ever arrives.
     }
   };
 
