@@ -4,6 +4,7 @@ import { basename } from "node:path";
 import { logger } from "../logger.js";
 import { streamManager } from "../stream-manager.js";
 import { agentSendMedia, agentSendText, agentUploadMedia } from "./agent-api.js";
+import { listAccountIds, resolveAccount, detectAccountConflicts } from "./accounts.js";
 import { DEFAULT_ACCOUNT_ID, THINKING_PLACEHOLDER } from "./constants.js";
 import { parseResponseUrlResult } from "./response-url.js";
 import { messageBuffers, resolveAgentConfig, resolveWebhookUrl, responseUrls, streamContext } from "./state.js";
@@ -145,6 +146,50 @@ export const wecomChannelPlugin = {
           description: "Webhook bot URLs for group notifications (key: name, value: webhook URL or key)",
           additionalProperties: { type: "string" },
         },
+        instances: {
+          type: "array",
+          description: "Additional bot / agent accounts. Each entry inherits top-level fields it does not override.",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["name"],
+            properties: {
+              name: {
+                type: "string",
+                description: "Unique account slug (lowercase, a-z0-9_- only). Used as accountId and in webhook paths.",
+                pattern: "^[a-z0-9_-]+$",
+              },
+              enabled: { type: "boolean", default: true },
+              token: { type: "string", description: "Bot Token (overrides top-level)" },
+              encodingAesKey: {
+                type: "string",
+                description: "Encoding AES Key (overrides top-level)",
+                minLength: 43,
+                maxLength: 43,
+              },
+              agent: {
+                type: "object",
+                description: "Agent configuration for this instance (full replacement, not merged with top-level)",
+                properties: {
+                  corpId: { type: "string" },
+                  corpSecret: { type: "string" },
+                  agentId: { type: "number" },
+                  token: { type: "string" },
+                  encodingAesKey: { type: "string", minLength: 43, maxLength: 43 },
+                },
+              },
+              webhooks: {
+                type: "object",
+                description: "Webhook bot URLs for this instance",
+                additionalProperties: { type: "string" },
+              },
+              webhookPath: {
+                type: "string",
+                description: "Custom webhook path (default: /webhooks/wecom/{name})",
+              },
+            },
+          },
+        },
       },
     },
     uiHints: {
@@ -173,55 +218,30 @@ export const wecomChannelPlugin = {
     },
   },
   config: {
-    listAccountIds: (cfg) => {
-      const wecom = cfg?.channels?.wecom;
-      if (!wecom || !wecom.enabled) {
-        return [];
-      }
-      return [DEFAULT_ACCOUNT_ID];
-    },
-    resolveAccount: (cfg, accountId) => {
-      const wecom = cfg?.channels?.wecom;
-      if (!wecom) {
-        return null;
-      }
-      const agent = wecom.agent;
-      const webhooks = wecom.webhooks;
-      return {
-        id: accountId || DEFAULT_ACCOUNT_ID,
-        accountId: accountId || DEFAULT_ACCOUNT_ID,
-        enabled: wecom.enabled !== false,
-        token: wecom.token || "",
-        encodingAesKey: wecom.encodingAesKey || "",
-        webhookPath: wecom.webhookPath || "/webhooks/wecom",
-        config: wecom,
-        agentConfigured: Boolean(agent?.corpId && agent?.corpSecret && agent?.agentId),
-        agentInboundConfigured: Boolean(
-          agent?.corpId && agent?.corpSecret && agent?.agentId && agent?.token && agent?.encodingAesKey,
-        ),
-        webhooksConfigured: Boolean(webhooks && Object.keys(webhooks).length > 0),
-      };
-    },
+    listAccountIds: (cfg) => listAccountIds(cfg),
+    resolveAccount: (cfg, accountId) => resolveAccount(cfg, accountId),
     defaultAccountId: (cfg) => {
-      const wecom = cfg?.channels?.wecom;
-      if (!wecom || !wecom.enabled) {
-        return null;
-      }
-      return DEFAULT_ACCOUNT_ID;
+      const ids = listAccountIds(cfg);
+      return ids.length > 0 ? ids[0] : null;
     },
-    setAccountEnabled: ({ cfg, accountId: _accountId, enabled }) => {
-      if (!cfg.channels) {
-        cfg.channels = {};
+    setAccountEnabled: ({ cfg, accountId, enabled }) => {
+      if (!cfg.channels) cfg.channels = {};
+      if (!cfg.channels.wecom) cfg.channels.wecom = {};
+      const wecom = cfg.channels.wecom;
+      if (!accountId || accountId === DEFAULT_ACCOUNT_ID) {
+        // Legacy single-account: toggle top-level enabled.
+        wecom.enabled = enabled;
+      } else if (wecom[accountId] && typeof wecom[accountId] === "object") {
+        // Dictionary mode: toggle per-account enabled.
+        wecom[accountId].enabled = enabled;
       }
-      if (!cfg.channels.wecom) {
-        cfg.channels.wecom = {};
-      }
-      cfg.channels.wecom.enabled = enabled;
       return cfg;
     },
-    deleteAccount: ({ cfg, accountId: _accountId }) => {
-      if (cfg.channels?.wecom) {
-        delete cfg.channels.wecom;
+    deleteAccount: ({ cfg, accountId }) => {
+      if (!accountId || accountId === DEFAULT_ACCOUNT_ID) {
+        if (cfg.channels?.wecom) delete cfg.channels.wecom;
+      } else if (cfg.channels?.wecom) {
+        delete cfg.channels.wecom[accountId];
       }
       return cfg;
     },
@@ -631,6 +651,15 @@ export const wecomChannelPlugin = {
         webhookPath: account.webhookPath,
       });
 
+      // Conflict detection: warn about duplicate tokens / agent IDs.
+      const conflicts = detectAccountConflicts(ctx.cfg);
+      for (const conflict of conflicts) {
+        logger.error(`WeCom config conflict: ${conflict.message}`, {
+          type: conflict.type,
+          accounts: conflict.accounts,
+        });
+      }
+
       const unregister = registerWebhookTarget({
         path: account.webhookPath || "/webhooks/wecom",
         account,
@@ -639,7 +668,10 @@ export const wecomChannelPlugin = {
 
       // Register Agent inbound webhook if agent inbound is fully configured.
       let unregisterAgent;
-      const agentInboundPath = "/webhooks/app";
+      // Per-account agent path: /webhooks/app for default, /webhooks/app/{accountId} for others.
+      const agentInboundPath = account.accountId === DEFAULT_ACCOUNT_ID
+        ? "/webhooks/app"
+        : `/webhooks/app/${account.accountId}`;
       const botPath = account.webhookPath || "/webhooks/wecom";
       if (account.agentInboundConfigured) {
         if (botPath === agentInboundPath) {
@@ -654,6 +686,7 @@ export const wecomChannelPlugin = {
               ...account,
               // Agent inbound uses its own token/encodingAesKey for callback verification.
               agentInbound: {
+                accountId: account.accountId,
                 token: agentCfg.token,
                 encodingAesKey: agentCfg.encodingAesKey,
                 corpId: agentCfg.corpId,

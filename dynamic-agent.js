@@ -8,25 +8,39 @@
 /**
  * Build a deterministic agent id for dm/group contexts.
  *
+ * When running in multi-account mode the accountId is embedded as a
+ * namespace segment so each account's conversations stay isolated:
+ *   default  → wecom-dm-{peerId}         (backward compatible)
+ *   "sales"  → wecom-sales-dm-{peerId}
+ *
  * @param {string} chatType - "dm" or "group"
  * @param {string} peerId - user id or group id
+ * @param {string} [accountId] - optional account namespace ("default" is omitted)
  * @returns {string} agentId
  */
-export function generateAgentId(chatType, peerId) {
+export function generateAgentId(chatType, peerId, accountId) {
   const sanitizedId = String(peerId)
     .toLowerCase()
     .replace(/[^a-z0-9_-]/g, "_");
+  // Only embed the account prefix for non-default accounts so existing
+  // single-account deployments keep identical agent ids (zero breaking change).
+  const ns = accountId && accountId !== "default" ? `${accountId}-` : "";
   if (chatType === "group") {
-    return `wecom-group-${sanitizedId}`;
+    return `wecom-${ns}group-${sanitizedId}`;
   }
-  return `wecom-dm-${sanitizedId}`;
+  return `wecom-${ns}dm-${sanitizedId}`;
 }
 
 /**
  * Resolve runtime dynamic-agent settings from config.
+ *
+ * Accepts either the full openclaw config (legacy) or a per-account wecom
+ * config block directly (multi-account).  Detection: if the object has
+ * `channels.wecom`, unwrap it; otherwise treat the object itself as the
+ * wecom account config.
  */
 export function getDynamicAgentConfig(config) {
-  const wecom = config?.channels?.wecom || {};
+  const wecom = config?.channels?.wecom ?? config ?? {};
   return {
     enabled: wecom.dynamicAgents?.enabled !== false,
     dmCreateAgent: wecom.dm?.createAgentOnFirstMessage !== false,

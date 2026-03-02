@@ -6,9 +6,11 @@ import {
 
 /**
  * Read command allowlist settings from config.
+ *
+ * Accepts either the full openclaw config or a per-account wecom config block.
  */
 export function getCommandConfig(config) {
-  const wecom = config?.channels?.wecom || {};
+  const wecom = config?.channels?.wecom ?? config ?? {};
   const commands = wecom.commands || {};
   return {
     allowlist: commands.allowlist || DEFAULT_COMMAND_ALLOWLIST,
@@ -48,11 +50,14 @@ export function checkCommandAllowlist(message, config) {
 }
 
 /**
- * Read admin user list from channels.wecom.adminUsers.
+ * Read admin user list from wecom config.
  * Admins bypass the command allowlist, but still keep dynamic agent routing.
+ *
+ * Accepts either the full openclaw config or a per-account wecom config block.
  */
 export function getWecomAdminUsers(config) {
-  const raw = config?.channels?.wecom?.adminUsers;
+  const wecom = config?.channels?.wecom ?? config ?? {};
+  const raw = wecom.adminUsers;
   if (!Array.isArray(raw)) {
     return [];
   }

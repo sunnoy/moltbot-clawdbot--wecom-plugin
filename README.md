@@ -304,8 +304,10 @@ Webhook Bot 用于向群聊发送通知消息。
 ### 工作原理
 
 1. 企业微信消息到达后，插件生成确定性的 `agentId`：
-   - **私聊**: `wecom-dm-<userId>`
-   - **群聊**: `wecom-group-<chatId>`
+   - **单账号私聊**: `wecom-dm-<userId>`
+   - **单账号群聊**: `wecom-group-<chatId>`
+   - **多账号私聊**: `wecom-<accountId>-dm-<userId>`
+   - **多账号群聊**: `wecom-<accountId>-group-<chatId>`
 2. OpenClaw 自动创建/复用对应的 Agent 工作区
 3. 每个用户/群聊拥有独立的对话历史和上下文
 4. **管理员用户**跳过动态路由，直接使用主 Agent
@@ -353,6 +355,60 @@ Webhook Bot 用于向群聊发送通知消息。
   }
 }
 ```
+
+### 多账号配置（Multi-Bot）
+
+支持在一个 OpenClaw 实例中接入多个企业微信机器人，每个机器人独立配置 Token、Agent 凭证、Webhook 等，互不干扰。
+
+> 💡 **典型场景**：一个企业微信里创建多个 AI 机器人（如「客服助手」「技术支持」），各自对应不同的 Agent 和会话空间。
+
+**配置方式：** 将 `channels.wecom` 下的值改为字典结构，每个 key 是账号 ID（如 `bot1`、`bot2`），value 包含该账号的完整配置：
+
+```json
+{
+  "channels": {
+    "wecom": {
+      "bot1": {
+        "token": "Bot1 的 Token",
+        "encodingAesKey": "Bot1 的 EncodingAESKey",
+        "adminUsers": ["admin1"],
+        "agent": {
+          "corpId": "企业 CorpID",
+          "corpSecret": "Bot1 应用 Secret",
+          "agentId": 1000001,
+          "token": "Bot1 回调 Token",
+          "encodingAesKey": "Bot1 回调 EncodingAESKey"
+        },
+        "webhooks": {
+          "ops-group": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx"
+        }
+      },
+      "bot2": {
+        "token": "Bot2 的 Token",
+        "encodingAesKey": "Bot2 的 EncodingAESKey",
+        "agent": {
+          "corpId": "企业 CorpID",
+          "corpSecret": "Bot2 应用 Secret",
+          "agentId": 1000002
+        }
+      }
+    }
+  }
+}
+```
+
+**说明：**
+
+| 项目 | 说明 |
+|------|------|
+| 账号 ID | 字典的 key，如 `bot1`、`bot2`，仅支持小写字母、数字、`-`、`_` |
+| 完全兼容 | 旧的单账号配置（`token` 直接写在 `wecom` 下）自动识别为 `default` 账号，无需修改 |
+| Webhook 路径 | 自动按账号分配：`/webhooks/wecom/bot1`、`/webhooks/wecom/bot2` |
+| Agent 回调路径 | 自动按账号分配：`/webhooks/app/bot1`、`/webhooks/app/bot2` |
+| 动态 Agent ID | 按账号隔离：`wecom-bot1-dm-{userId}`、`wecom-bot2-group-{chatId}` |
+| 冲突检测 | 启动时自动检测重复的 Token 或 Agent ID，避免消息路由错乱 |
+
+> ⚠️ **注意**：多账号模式下，每个账号的 Webhook URL 需要在企业微信后台分别配置对应的路径（如 `/webhooks/wecom/bot1`）。
 
 ### 工作区模板
 

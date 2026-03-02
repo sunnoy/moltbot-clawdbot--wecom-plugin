@@ -147,7 +147,7 @@ export async function processInboundMessage({
   // Apply group mention gating rules.
   let rawBody = rawContent;
   if (isGroupChat) {
-    if (!shouldTriggerGroupResponse(rawContent, config)) {
+    if (!shouldTriggerGroupResponse(rawContent, account.config)) {
       logger.debug("WeCom: group message ignored (no mention)", { chatId, senderId });
       if (streamId) {
         streamManager.replaceIfPlaceholder(streamId, "请@提及我以获取回复。", THINKING_PLACEHOLDER);
@@ -157,7 +157,7 @@ export async function processInboundMessage({
       return;
     }
     // Strip mention markers from the effective prompt.
-    rawBody = extractGroupMessageContent(rawContent, config);
+    rawBody = extractGroupMessageContent(rawContent, account.config);
   }
 
   const commandAuthorized = resolveWecomCommandAuthorized({
@@ -180,12 +180,12 @@ export async function processInboundMessage({
   // Command allowlist enforcement
   // Admins bypass the allowlist entirely.
   // ========================================================================
-  const senderIsAdmin = isWecomAdmin(senderId, config);
-  const commandCheck = checkCommandAllowlist(rawBody, config);
+  const senderIsAdmin = isWecomAdmin(senderId, account.config);
+  const commandCheck = checkCommandAllowlist(rawBody, account.config);
 
   if (commandCheck.isCommand && !commandCheck.allowed && !senderIsAdmin) {
     // Return block message when command is outside the allowlist.
-    const cmdConfig = getCommandConfig(config);
+    const cmdConfig = getCommandConfig(account.config);
     logger.warn("WeCom: blocked command", {
       command: commandCheck.command,
       from: senderId,
@@ -224,12 +224,12 @@ export async function processInboundMessage({
   // Dynamic agent routing
   // Admins also use dynamic agents; admin flag only affects command allowlist.
   // ========================================================================
-  const dynamicConfig = getDynamicAgentConfig(config);
+  const dynamicConfig = getDynamicAgentConfig(account.config);
 
   // Compute deterministic agent target for this conversation.
   const targetAgentId =
-    dynamicConfig.enabled && shouldUseDynamicAgent({ chatType: peerKind, config })
-      ? generateAgentId(peerKind, peerId)
+    dynamicConfig.enabled && shouldUseDynamicAgent({ chatType: peerKind, config: account.config })
+      ? generateAgentId(peerKind, peerId, account.accountId)
       : null;
 
   if (targetAgentId) {
@@ -428,7 +428,7 @@ export async function processInboundMessage({
 
     // Dispatch reply with AI processing.
     // Wrap in streamContext so outbound adapters resolve the correct stream.
-    await streamContext.run({ streamId, streamKey, agentId: route.agentId }, async () => {
+    await streamContext.run({ streamId, streamKey, agentId: route.agentId, accountId: account.accountId }, async () => {
       await core.reply.dispatchReplyWithBufferedBlockDispatcher({
         ctx: ctxPayload,
         cfg: config,

@@ -17,6 +17,7 @@ import {
   shouldUseDynamicAgent,
 } from "../dynamic-agent.js";
 import { agentSendText, agentDownloadMedia } from "./agent-api.js";
+import { resolveAccount } from "./accounts.js";
 import { resolveWecomCommandAuthorized } from "./allow-from.js";
 import { checkCommandAllowlist, getCommandConfig, isWecomAdmin } from "./commands.js";
 import { MAX_REQUEST_BODY_SIZE } from "./constants.js";
@@ -119,7 +120,7 @@ function handleUrlVerification(req, res, crypto) {
  * Handle WeCom message callback.
  * Read XML → extract Encrypt → verify → decrypt → parse → dedup → respond 200 → async process.
  */
-async function handleMessageCallback(req, res, crypto, agentConfig, config) {
+async function handleMessageCallback(req, res, crypto, agentConfig, config, accountId) {
   try {
     const rawXml = await readRawBody(req);
     logger.debug("[agent-inbound] received callback", { bodyBytes: Buffer.byteLength(rawXml, "utf8") });
@@ -178,6 +179,7 @@ async function handleMessageCallback(req, res, crypto, agentConfig, config) {
     processAgentMessage({
       agentConfig,
       config,
+      accountId,
       fromUser,
       chatId,
       msgType,
@@ -206,6 +208,7 @@ async function handleMessageCallback(req, res, crypto, agentConfig, config) {
 async function processAgentMessage({
   agentConfig,
   config,
+  accountId,
   fromUser,
   chatId,
   msgType,
@@ -214,6 +217,10 @@ async function processAgentMessage({
 }) {
   const runtime = getRuntime();
   const core = runtime.channel;
+
+  // Resolve per-account config for utility functions.
+  const resolvedAccount = resolveAccount(config, accountId);
+  const accountCfg = resolvedAccount?.config || {};
 
   const isGroup = Boolean(chatId);
   const peerId = isGroup ? chatId : fromUser;
@@ -263,11 +270,11 @@ async function processAgentMessage({
 
   // ── Command allowlist ─────────────────────────────────────────
 
-  const senderIsAdmin = isWecomAdmin(fromUser, config);
-  const commandCheck = checkCommandAllowlist(finalContent, config);
+  const senderIsAdmin = isWecomAdmin(fromUser, accountCfg);
+  const commandCheck = checkCommandAllowlist(finalContent, accountCfg);
 
   if (commandCheck.isCommand && !commandCheck.allowed && !senderIsAdmin) {
-    const cmdConfig = getCommandConfig(config);
+    const cmdConfig = getCommandConfig(accountCfg);
     logger.warn("[agent-inbound] blocked command", { command: commandCheck.command, from: fromUser });
     try {
       await agentSendText({ agent: agentConfig, toUser: fromUser, text: cmdConfig.blockMessage });
@@ -279,10 +286,10 @@ async function processAgentMessage({
 
   // ── Dynamic agent routing ─────────────────────────────────────
 
-  const dynamicConfig = getDynamicAgentConfig(config);
+  const dynamicConfig = getDynamicAgentConfig(accountCfg);
   const targetAgentId =
-    dynamicConfig.enabled && shouldUseDynamicAgent({ chatType: peerKind, config })
-      ? generateAgentId(peerKind, peerId)
+    dynamicConfig.enabled && shouldUseDynamicAgent({ chatType: peerKind, config: accountCfg })
+      ? generateAgentId(peerKind, peerId, accountId)
       : null;
 
   if (targetAgentId) {
@@ -295,7 +302,7 @@ async function processAgentMessage({
   const route = core.routing.resolveAgentRoute({
     cfg: config,
     channel: "wecom",
-    accountId: "default",
+    accountId: accountId || "default",
     peer: { kind: peerKind, id: peerId },
   });
 
@@ -327,7 +334,7 @@ async function processAgentMessage({
 
   const commandAuthorized = resolveWecomCommandAuthorized({
     cfg: config,
-    accountId: "default",
+    accountId: accountId || "default",
     senderId: fromUser,
   });
 
@@ -418,13 +425,14 @@ export async function handleAgentInbound({ req, res, agentAccount, config }) {
     corpSecret: agentAccount.corpSecret,
     agentId: agentAccount.agentId,
   };
+  const accountId = agentAccount.accountId || "default";
 
   if (req.method === "GET") {
     return handleUrlVerification(req, res, crypto);
   }
 
   if (req.method === "POST") {
-    return handleMessageCallback(req, res, crypto, agentConfig, config);
+    return handleMessageCallback(req, res, crypto, agentConfig, config, accountId);
   }
 
   res.writeHead(405, { "Content-Type": "text/plain" });

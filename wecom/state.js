@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { WEBHOOK_BOT_SEND_URL } from "./constants.js";
+import { resolveAgentConfigForAccount, resolveAccount } from "./accounts.js";
 
 const runtimeState = {
   runtime: null,
@@ -51,17 +52,15 @@ export function setEnsureDynamicAgentWriteQueue(queuePromise) {
 /**
  * Extract Agent API config from the runtime openclaw config.
  * Returns null when Agent mode is not configured.
+ *
+ * @param {string} [accountId] - Optional account ID. When omitted, first tries
+ *   the streamContext async store, then falls back to the default account.
  */
-export function resolveAgentConfig() {
+export function resolveAgentConfig(accountId) {
   const config = getOpenclawConfig();
-  const wecom = config?.channels?.wecom;
-  const agent = wecom?.agent;
-  if (!agent?.corpId || !agent?.corpSecret || !agent?.agentId) return null;
-  return {
-    corpId: agent.corpId,
-    corpSecret: agent.corpSecret,
-    agentId: agent.agentId,
-  };
+  // Determine effective accountId: explicit param > async context > default.
+  const effectiveId = accountId || streamContext.getStore()?.accountId || undefined;
+  return resolveAgentConfigForAccount(config, effectiveId);
 }
 
 /**
@@ -70,11 +69,14 @@ export function resolveAgentConfig() {
  * Returns null when the webhook name is not configured.
  *
  * @param {string} name - Webhook name from the `to` field (e.g. "ops-group")
+ * @param {string} [accountId] - Optional account ID for multi-account lookup.
  * @returns {string|null}
  */
-export function resolveWebhookUrl(name) {
+export function resolveWebhookUrl(name, accountId) {
   const config = getOpenclawConfig();
-  const webhooks = config?.channels?.wecom?.webhooks;
+  const effectiveId = accountId || streamContext.getStore()?.accountId || undefined;
+  const account = resolveAccount(config, effectiveId);
+  const webhooks = account?.config?.webhooks;
   if (!webhooks || !webhooks[name]) return null;
   const value = webhooks[name];
   if (value.startsWith("http")) return value;

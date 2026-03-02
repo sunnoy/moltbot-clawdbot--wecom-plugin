@@ -1,3 +1,4 @@
+import { resolveAccount } from "./accounts.js";
 import { DEFAULT_ACCOUNT_ID } from "./constants.js";
 
 export function normalizeWecomAllowFromEntry(raw) {
@@ -15,25 +16,11 @@ export function normalizeWecomAllowFromEntry(raw) {
 }
 
 export function resolveWecomAllowFrom(cfg, accountId) {
-  const wecom = cfg?.channels?.wecom;
-  if (!wecom) {
-    return [];
-  }
+  const account = resolveAccount(cfg, accountId);
+  if (!account) return [];
 
-  const normalizedAccountId = String(accountId || DEFAULT_ACCOUNT_ID)
-    .trim()
-    .toLowerCase();
-  const accounts = wecom.accounts;
-  const account =
-    accounts && typeof accounts === "object"
-      ? (accounts[accountId] ??
-        accounts[
-          Object.keys(accounts).find((key) => key.toLowerCase() === normalizedAccountId) ?? ""
-        ])
-      : undefined;
-
-  const allowFromRaw =
-    account?.dm?.allowFrom ?? account?.allowFrom ?? wecom.dm?.allowFrom ?? wecom.allowFrom ?? [];
+  const accountCfg = account.config;
+  const allowFromRaw = accountCfg?.dm?.allowFrom ?? accountCfg?.allowFrom ?? [];
 
   if (!Array.isArray(allowFromRaw)) {
     return [];
