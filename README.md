@@ -599,6 +599,36 @@ openclaw send "party:2" "全体员工通知"
 
 3. **检查是否有多余空格/换行**：确保密钥字符串前后没有空格或换行符
 
+### Q: 日志报错 reply delivery failed ... 60020 not allow to access from your ip 怎么办？
+
+**A:** 这是企业微信对「自建应用 API 主动发送消息」的安全限制。错误码 60020 表示：当前服务器出口公网 IP 未加入企业微信应用的可信 IP 白名单。
+
+**典型日志示例：**
+
+```bash
+[wecom] [agent-inbound] reply delivery failed {"error":"agent send text failed: 60020 not allow to access from your ip, ... from ip: xx.xx.xx.xx"}
+```
+
+
+
+**原因说明**
+
+当插件使用 Agent API 回退（或 Agent 模式主动推送）发送消息时，会调用企业微信开放接口（如 qyapi.weixin.qq.com）。
+如果企业微信后台为该应用启用了 企业可信IP / 接口可信IP 校验，而当前服务器出口公网 IP 不在白名单内，企业微信会拒绝请求并返回 60020。
+
+**解决方法**
+
+1. 登录企业微信管理后台
+
+2. 进入对应的 自建应用 详情页
+
+3. 找到 企业可信IP 配置项
+
+4. 将服务器公网出口 IP 加入白名单
+   - 建议以错误日志中的 from ip 为准（你的服务器公网ip）
+
+5. 保存配置后重试发送消息
+
 ## 项目结构
 
 ```
