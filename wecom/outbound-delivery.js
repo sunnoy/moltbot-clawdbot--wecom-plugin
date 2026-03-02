@@ -1,4 +1,4 @@
-import { readFile, access } from "node:fs/promises";
+import { readFile, access, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { logger } from "../logger.js";
 import { streamManager } from "../stream-manager.js";
@@ -9,18 +9,81 @@ import { resolveActiveStream } from "./stream-utils.js";
 import { resolveAgentWorkspaceDirLocal } from "./workspace-template.js";
 import { THINKING_PLACEHOLDER } from "./constants.js";
 
+// WeCom upload API rejects files smaller than 5 bytes (error 40006).
+const WECOM_MIN_FILE_SIZE = 5;
+
+/**
+ * Resolve sandbox /workspace/… paths to the host-side equivalent.
+ * Inside the sandbox container, /workspace is mounted from
+ * ~/.openclaw/workspace-{agentId} on the host.  Any path starting with
+ * /workspace/ is transparently rewritten when an agentId is available.
+ */
+function resolveHostPath(filePath, effectiveAgentId) {
+  if (effectiveAgentId && filePath.startsWith("/workspace/")) {
+    const relative = filePath.slice("/workspace/".length);
+    const hostPath = join(resolveAgentWorkspaceDirLocal(effectiveAgentId), relative);
+    logger.debug("Resolved sandbox path to host path", { sandbox: filePath, host: hostPath });
+    return hostPath;
+  }
+  return filePath;
+}
+
+/**
+ * Upload a local file and send via Agent DM.
+ * If the file is smaller than WECOM_MIN_FILE_SIZE (WeCom rejects tiny files),
+ * read the content and send as a text message instead.
+ * Returns a user-facing hint string.
+ */
+async function uploadAndSendFile({ hostPath, filename, agent, senderId, streamId }) {
+  const fileBuf = await readFile(hostPath);
+  if (fileBuf.length < WECOM_MIN_FILE_SIZE) {
+    // File too small for WeCom upload — send content inline as text.
+    const content = fileBuf.toString("utf-8");
+    await agentSendText({
+      agent,
+      toUser: senderId,
+      text: `📄 ${filename}:\n${content}`,
+    });
+    logger.info("Sent tiny file as text via Agent DM", {
+      streamId,
+      filename,
+      size: fileBuf.length,
+    });
+    return `📎 文件「${filename}」内容已通过私信发送给您`;
+  }
+
+  const uploadedId = await agentUploadMedia({
+    agent,
+    type: "file",
+    buffer: fileBuf,
+    filename,
+  });
+  await agentSendMedia({
+    agent,
+    toUser: senderId,
+    mediaId: uploadedId,
+    mediaType: "file",
+  });
+  logger.info("Sent file via Agent DM", { streamId, filename, size: fileBuf.length });
+  return `📎 文件「${filename}」已通过私信发送给您`;
+}
+
 export async function deliverWecomReply({ payload, senderId, streamId, agentId }) {
   const text = payload.text || "";
+  // Resolve effective agentId from parameter or async context.
+  const effectiveAgentId = agentId || streamContext.getStore()?.agentId;
 
   logger.debug("deliverWecomReply called", {
     hasText: !!text.trim(),
     textPreview: text.substring(0, 50),
     streamId,
     senderId,
+    agentId: effectiveAgentId,
   });
 
   // Handle absolute-path MEDIA lines manually; OpenClaw rejects these paths upstream.
-  const mediaRegex = /^MEDIA:\s*(.+)$/gm;
+  // Match both line-start (^MEDIA:) and inline (…MEDIA:) patterns.
+  const mediaRegex = /(?:^|(?<=\s))MEDIA:\s*(.+?)$/gm;
   const mediaMatches = [];
   let match;
   while ((match = mediaRegex.exec(text)) !== null) {
@@ -44,39 +107,35 @@ export async function deliverWecomReply({ payload, senderId, streamId, agentId }
   let processedText = text;
   if (mediaMatches.length > 0 && streamId) {
     for (const media of mediaMatches) {
-      const mediaExt = media.path.split(".").pop()?.toLowerCase() || "";
+      // Resolve /workspace/ sandbox paths to host-side paths.
+      const resolvedMediaPath = resolveHostPath(media.path, effectiveAgentId);
+      const mediaExt = resolvedMediaPath.split(".").pop()?.toLowerCase() || "";
       if (mediaImageExts.has(mediaExt)) {
         // Image: queue for delivery when stream finishes.
-        const queued = streamManager.queueImage(streamId, media.path);
+        const queued = streamManager.queueImage(streamId, resolvedMediaPath);
         if (queued) {
           processedText = processedText.replace(media.fullMatch, "").trim();
           logger.info("Queued absolute path image for stream", {
             streamId,
-            imagePath: media.path,
+            imagePath: resolvedMediaPath,
           });
         }
       } else {
         // Non-image file: WeCom Bot stream API does not support files.
         // Send via Agent DM and replace the MEDIA line with a hint.
-        const mediaFilename = basename(media.path);
+        const mediaFilename = basename(resolvedMediaPath);
         const agentCfgMedia = resolveAgentConfig();
         if (agentCfgMedia && senderId) {
           try {
-            const mediaBuf = await readFile(media.path);
-            const uploadedMediaId = await agentUploadMedia({
-              agent: agentCfgMedia,
-              type: "file",
-              buffer: mediaBuf,
+            const hint = await uploadAndSendFile({
+              hostPath: resolvedMediaPath,
               filename: mediaFilename,
-            });
-            await agentSendMedia({
               agent: agentCfgMedia,
-              toUser: senderId,
-              mediaId: uploadedMediaId,
-              mediaType: "file",
+              senderId,
+              streamId,
             });
             processedText = processedText
-              .replace(media.fullMatch, `📎 文件已通过私信发送给您：${mediaFilename}`)
+              .replace(media.fullMatch, hint)
               .trim();
             logger.info("Sent non-image file via Agent DM (MEDIA line)", {
               streamId,
@@ -115,6 +174,8 @@ export async function deliverWecomReply({ payload, senderId, streamId, agentId }
         absPath = absPath.replace(/^sandbox:\/{0,2}/, "");
         if (!absPath.startsWith("/")) absPath = "/" + absPath;
       }
+      // Resolve /workspace/ sandbox paths to host-side paths.
+      absPath = resolveHostPath(absPath, effectiveAgentId);
 
       const isLocal = absPath.startsWith("/");
       const mediaFilename = isLocal ? basename(absPath) : (basename(new URL(mediaPath).pathname) || "file");
@@ -144,18 +205,33 @@ export async function deliverWecomReply({ payload, senderId, streamId, agentId }
             let uploadType = "file";
             if (payloadImageExts.has(ext)) uploadType = "image";
 
-            const uploadedId = await agentUploadMedia({
-              agent: agentCfgPayload,
-              type: uploadType,
-              buffer: fileBuf,
-              filename: mediaFilename,
-            });
-            await agentSendMedia({
-              agent: agentCfgPayload,
-              toUser: senderId,
-              mediaId: uploadedId,
-              mediaType: uploadType,
-            });
+            // Check minimum file size for WeCom upload.
+            if (fileBuf.length < WECOM_MIN_FILE_SIZE) {
+              const content = fileBuf.toString("utf-8");
+              await agentSendText({
+                agent: agentCfgPayload,
+                toUser: senderId,
+                text: `📄 ${mediaFilename}:\n${content}`,
+              });
+              logger.info("Sent tiny payload media as text via Agent DM", {
+                streamId,
+                filename: mediaFilename,
+                size: fileBuf.length,
+              });
+            } else {
+              const uploadedId = await agentUploadMedia({
+                agent: agentCfgPayload,
+                type: uploadType,
+                buffer: fileBuf,
+                filename: mediaFilename,
+              });
+              await agentSendMedia({
+                agent: agentCfgPayload,
+                toUser: senderId,
+                mediaId: uploadedId,
+                mediaType: uploadType,
+              });
+            }
 
             // Add hint in stream text
             const hint = `📎 文件已通过私信发送给您：${mediaFilename}`;
@@ -200,7 +276,6 @@ export async function deliverWecomReply({ payload, senderId, streamId, agentId }
   // When the LLM mentions a file path like "/workspace/report.pdf", we resolve
   // the host-side path, verify the file exists, and send it via Agent DM.
   // ──────────────────────────────────────────────────────────────────────────
-  const effectiveAgentId = agentId || streamContext.getStore()?.agentId;
   if (effectiveAgentId && processedText) {
     // Match /workspace/ paths (non-greedy: stop at whitespace, quotes, backticks,
     // angle brackets, parentheses, or end of string).
@@ -246,24 +321,22 @@ export async function deliverWecomReply({ payload, senderId, streamId, agentId }
         // File exists on host — send via Agent DM.
         if (agentCfgAuto && senderId) {
           try {
-            const fileBuf = await readFile(hostPath);
-            const uploadedId = await agentUploadMedia({
-              agent: agentCfgAuto,
-              type: "file",
-              buffer: fileBuf,
+            const hint = await uploadAndSendFile({
+              hostPath,
               filename,
-            });
-            await agentSendMedia({
               agent: agentCfgAuto,
-              toUser: senderId,
-              mediaId: uploadedId,
-              mediaType: "file",
+              senderId,
+              streamId,
             });
             // Replace the path mention in text with a delivery hint.
-            processedText = processedText.replace(
-              wsPath,
-              `📎 文件「${filename}」已通过私信发送给您`,
-            );
+            // Also strip any preceding "MEDIA:" prefix if the LLM wrote "MEDIA:/workspace/…".
+            const escapedPath = wsPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            const withMediaPrefix = new RegExp(`MEDIA:\\s*${escapedPath}`, "g");
+            if (withMediaPrefix.test(processedText)) {
+              processedText = processedText.replace(withMediaPrefix, hint);
+            } else {
+              processedText = processedText.replace(wsPath, hint);
+            }
             logger.info("Auto-detect: sent workspace file via Agent DM", {
               streamId,
               wsPath,
