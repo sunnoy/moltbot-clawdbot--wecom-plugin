@@ -23,7 +23,10 @@
         "openclaw": "*"
     },
     "scripts": {
-        "test": "node --test tests/*.test.js"
+        "test": "npm run test:unit",
+        "test:unit": "node --test tests/*.test.js",
+        "test:e2e": "node --test tests/e2e/*.e2e.test.js",
+        "test:e2e:ali-ai": "bash tests/e2e/run-ali-ai.sh"
     },
     "openclaw": {
         "extensions": [

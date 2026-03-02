@@ -61,6 +61,46 @@ npm test
 
 运行单元测试（使用 Node.js 内置测试运行器）。
 
+### 运行真实 E2E 测试（远程 OpenClaw）
+
+本项目新增了真实联调 e2e 用例（`tests/e2e/remote-wecom.e2e.test.js`），会对真实 `/webhooks/wecom` 做加密请求、验证握手、发送消息并轮询 stream 直到结束。
+
+1. 使用你当前环境的 `ssh ali-ai` 一键执行（自动读取远程 `~/.openclaw/openclaw.json`，并建立本地隧道）：
+
+```bash
+npm run test:e2e:ali-ai
+```
+
+2. 或者手动指定环境变量执行：
+
+```bash
+E2E_WECOM_BASE_URL=http://127.0.0.1:28789 \
+E2E_WECOM_TOKEN=xxx \
+E2E_WECOM_ENCODING_AES_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
+E2E_WECOM_WEBHOOK_PATH=/webhooks/wecom \
+npm run test:e2e
+```
+
+可选变量：
+- `E2E_WECOM_TEST_USER`（默认 `wecom-e2e-user`）
+- `E2E_WECOM_TEST_COMMAND`（默认 `/status`）
+- `E2E_WECOM_POLL_INTERVAL_MS`（默认 `1200`）
+- `E2E_WECOM_STREAM_TIMEOUT_MS`（默认 `90000`）
+- `E2E_WECOM_ENABLE_BROWSER_CASE`（默认 `1`，设置 `0` 可跳过浏览器场景）
+- `E2E_WECOM_BROWSER_TIMEOUT_MS`（默认 `180000`）
+- `E2E_WECOM_BROWSER_REQUIRE_IMAGE`（默认 `0`，设置 `1` 强制断言 `msg_item` 图片出站）
+- `E2E_WECOM_BROWSER_PROMPT`（浏览器场景自定义提示词）
+- `E2E_WECOM_BROWSER_BING_PDF_PROMPT`（Bing + 保存 PDF 场景提示词）
+- `E2E_WECOM_ENABLE_BROWSER_BING_PDF_CASE`（默认 `1`）
+- `E2E_BROWSER_PREPARE_MODE`（`check`/`install`/`off`，默认 `check`）
+- `E2E_BROWSER_REQUIRE_READY`（默认 `0`，设置 `1` 时浏览器环境不满足则中止）
+- `E2E_COLLECT_BROWSER_PDF`（默认 `1`，执行后自动收集远程 sandbox 中的 PDF）
+- `E2E_PDF_OUTPUT_DIR`（默认 `tests/e2e/artifacts`）
+
+> 说明：`test:e2e:ali-ai` 会消耗远程实例的真实 LLM token，并覆盖多种真实入站/出站场景（含浏览器相关场景）。
+> 说明：执行 `test:e2e:ali-ai` 会先做 browser sandbox 准备检查（`prepare-browser-sandbox.sh`），测试后会尝试抓取 PDF 产物（`collect-browser-pdf.sh`）供用户下载。
+> 说明：当 browser sandbox 未就绪（缺浏览器二进制或缺 `browser` skill）时，Bing+PDF case 会自动跳过，并在准备检查输出中标记 `STATUS=MISSING`。
+
 ## 配置
 
 在 OpenClaw 配置文件（`~/.openclaw/openclaw.json`）中添加：
@@ -592,6 +632,12 @@ openclaw-plugin-wecom/
 │   ├── webhook-targets.js   # Webhook 目标管理
 │   └── workspace-template.js # 工作区模板
 ├── tests/                   # 测试目录
+│   ├── e2e/
+│   │   ├── remote-wecom.e2e.test.js # 真实远程 E2E（加密请求 + stream 轮询）
+│   │   └── run-ali-ai.sh    # ssh ali-ai 一键联调脚本
+│   │   ├── prepare-browser-sandbox.sh # browser sandbox 环境检查/准备
+│   │   └── collect-browser-pdf.sh # 收集并下载 PDF 测试产物
+│   ├── outbound.test.js     # 出站投递回退逻辑测试
 │   ├── target.test.js       # 目标解析器测试
 │   └── xml-parser.test.js   # XML 解析器测试
 ├── README.md                # 本文档
@@ -608,3 +654,248 @@ openclaw-plugin-wecom/
 ## 开源协议
 
 本项目采用 [ISC License](./LICENSE) 协议。
+
+## 配置示例参考
+
+以下是一个生产环境的脱敏配置示例，供参考：
+
+```json
+{
+  "meta": {
+    "lastTouchedVersion": "2026.2.25",
+    "lastTouchedAt": "2026-02-28T03:14:11.564Z"
+  },
+  "wizard": {
+    "lastRunAt": "2026-02-26T09:29:04.028Z",
+    "lastRunVersion": "2026.2.25",
+    "lastRunCommand": "onboard",
+    "lastRunMode": "local"
+  },
+  "logging": {
+    "level": "info",
+    "consoleLevel": "debug",
+    "consoleStyle": "pretty"
+  },
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "bailian": {
+        "baseUrl": "https://coding.dashscope.aliyuncs.com/v1",
+        "apiKey": "sk-xxxxxxxxxxxxxxxxxxxxxx",
+        "api": "openai-completions",
+        "models": [
+          { "id": "qwen3.5-plus", "name": "qwen3.5-plus", "reasoning": false, "input": ["text", "image"], "contextWindow": 1000000, "maxTokens": 65536 },
+          { "id": "MiniMax-M2.5", "name": "MiniMax-M2.5", "reasoning": false, "input": ["text"], "contextWindow": 1000000, "maxTokens": 65536 },
+          { "id": "glm-5", "name": "glm-5", "reasoning": false, "input": ["text"], "contextWindow": 202752, "maxTokens": 16384 },
+          { "id": "glm-4.7", "name": "glm-4.7", "reasoning": false, "input": ["text"], "contextWindow": 202752, "maxTokens": 16384 },
+          { "id": "kimi-k2.5", "name": "kimi-k2.5", "reasoning": false, "input": ["text", "image"], "contextWindow": 262144, "maxTokens": 32768 }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": { "primary": "bailian/kimi-k2.5" },
+      "models": {
+        "bailian/qwen3.5-plus": {},
+        "bailian/MiniMax-M2.5": {},
+        "bailian/glm-5": {},
+        "bailian/glm-4.7": {},
+        "bailian/kimi-k2.5": {}
+      },
+      "workspace": "/path/to/workspace",
+      "userTimezone": "Asia/Shanghai",
+      "timeFormat": "24",
+      "compaction": {
+        "mode": "safeguard",
+        "reserveTokensFloor": 20000,
+        "memoryFlush": {
+          "enabled": true,
+          "softThresholdTokens": 4000
+        }
+      },
+      "thinkingDefault": "medium",
+      "verboseDefault": "on",
+      "heartbeat": {
+        "every": "10m",
+        "target": "last",
+        "directPolicy": "allow"
+      },
+      "sandbox": {
+        "mode": "all",
+        "workspaceAccess": "rw",
+        "scope": "agent",
+        "docker": {
+          "image": "your-registry.com/openclaw-agent:v2026.x.x",
+          "readOnlyRoot": false,
+          "network": "bridge",
+          "extraHosts": [
+            "your-domain.internal:xxx.xxx.xxx.xxx"
+          ],
+          "binds": [
+            "/path/to/skills:/workspace/skills:ro"
+          ],
+          "dangerouslyAllowReservedContainerTargets": true,
+          "dangerouslyAllowExternalBindSources": true
+        },
+        "prune": {
+          "idleHours": 87600,
+          "maxAgeDays": 3650
+        }
+      }
+    },
+    "list": [
+      { "id": "main" },
+      { "id": "wecom-dm-xxxxxx" }
+    ]
+  },
+  "commands": {
+    "native": "auto",
+    "nativeSkills": "auto",
+    "restart": true,
+    "ownerDisplay": "raw"
+  },
+  "session": {
+    "dmScope": "per-channel-peer"
+  },
+  "hooks": {
+    "internal": {
+      "enabled": true,
+      "entries": {
+        "boot-md": { "enabled": true },
+        "command-logger": { "enabled": true },
+        "session-memory": { "enabled": true },
+        "bootstrap-extra-files": { "enabled": true }
+      }
+    }
+  },
+  "channels": {
+    "wecom": {
+      "enabled": true,
+      "token": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "encodingAesKey": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "commands": {
+        "enabled": true,
+        "allowlist": ["/help", "/commands", "/status", "/context", "/whoami", "/new", "/compact", "/stop", "/reset", "/usage", "/think", "/thinking", "/t", "/verbose", "/v", "/reasoning", "/reason", "/model", "/models", "/skill"]
+      },
+      "dynamicAgents": { "enabled": true },
+      "dm": { "createAgentOnFirstMessage": true },
+      "groupChat": { "enabled": true, "requireMention": true },
+      "adminUsers": ["admin_userid"],
+      "workspaceTemplate": "/path/to/workspace-template",
+      "agent": {
+        "corpId": "wwxxxxxxxxxxxxxxxx",
+        "corpSecret": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "agentId": 1000002,
+        "token": "xxxxxxxxxxxxxxx",
+        "encodingAesKey": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      }
+    }
+  },
+  "gateway": {
+    "port": 18789,
+    "mode": "local",
+    "bind": "lan",
+    "controlUi": {
+      "dangerouslyAllowHostHeaderOriginFallback": true,
+      "allowInsecureAuth": true
+    },
+    "auth": {
+      "mode": "token",
+      "token": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    },
+    "tailscale": {
+      "mode": "off",
+      "resetOnExit": false
+    }
+  },
+  "skills": {
+    "allowBundled": ["_none_"],
+    "load": {
+      "extraDirs": ["/path/to/skills"],
+      "watch": true,
+      "watchDebounceMs": 250
+    },
+    "install": { "nodeManager": "npm" }
+  },
+  "plugins": {
+    "allow": ["wecom"],
+    "entries": { "wecom": { "enabled": true } }
+  }
+}
+```
+
+## 自定义 Skills 配合沙箱使用实践
+
+OpenClaw 支持自定义 Skills 并通过沙箱（Docker）隔离执行，以下是生产环境的实践配置：
+
+
+### 沙箱配置关键点
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "sandbox": {
+        "mode": "all",
+        "workspaceAccess": "rw",
+        "scope": "agent",
+        "docker": {
+          "image": "your-registry.com/openclaw-agent:v2026.x.x",
+          "readOnlyRoot": false,
+          "network": "bridge",
+          "extraHosts": [
+            "your-domain.internal:xxx.xxx.xxx.xxx"
+          ],
+          "binds": [
+            "/path/to/skills:/workspace/skills:ro"
+          ],
+          "dangerouslyAllowReservedContainerTargets": true,
+          "dangerouslyAllowExternalBindSources": true
+        },
+        "prune": {
+          "idleHours": 87600,
+          "maxAgeDays": 3650
+        }
+      }
+    }
+  },
+  "skills": {
+    "allowBundled": ["_none_"],
+    "load": {
+      "extraDirs": ["/path/to/skills"],
+      "watch": true,
+      "watchDebounceMs": 250
+    }
+  }
+}
+```
+
+### 配置说明
+
+| 配置项 | 说明 |
+|--------|------|
+| `sandbox.mode` | 沙箱模式：`all` 所有操作都走沙箱 |
+| `sandbox.workspaceAccess` | 工作区访问权限：`rw` 读写 |
+| `sandbox.scope` | 沙箱作用域：`agent` 每个 Agent 独立沙箱 |
+| `sandbox.docker.image` | 沙箱使用的 Docker 镜像 |
+| `sandbox.docker.readOnlyRoot` | 是否只读根文件系统 |
+| `sandbox.docker.network` | 网络模式：`bridge` 桥接网络 |
+| `sandbox.docker.binds` | 挂载目录：将宿主机 skills 目录映射到沙箱内 `/workspace/skills`（只读） |
+| `sandbox.docker.extraHosts` | 添加额外 hosts，解决内网服务域名解析 |
+| `sandbox.docker.dangerouslyAllowReservedContainerTargets` | 允许容器访问保留目标 |
+| `sandbox.docker.dangerouslyAllowExternalBindSources` | 允许外部绑定源 |
+| `sandbox.prune.idleHours` | 空闲容器清理时间（小时） |
+| `sandbox.prune.maxAgeDays` | 容器最大存活天数 |
+| `skills.allowBundled` | 允许的内置 skills（`["_none_"]` 表示禁用所有内置） |
+| `skills.load.extraDirs` | 自定义 skills 加载目录 |
+| `skills.load.watch` | 启用热加载，修改 skill 无需重启 |
+| `skills.load.watchDebounceMs` | 热加载防抖时间（毫秒） |
+
+### 使用流程
+
+1. 在宿主机创建自定义 skill 目录
+2. 配置 `binds` 将目录映射到沙箱
+3. 在 `skills.load.extraDirs` 指定加载路径
+4. Agent 在沙箱中可通过 `/workspace/skills` 访问自定义 skills
+5. 使用 `/skill` 命令查看和管理 skills
