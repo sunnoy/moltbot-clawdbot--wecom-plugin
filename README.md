@@ -124,6 +124,9 @@ npm run test:e2e
         "enabled": true,
         "allowlist": ["/new", "/status", "/help", "/compact"]
       },
+      "network": {
+        "egressProxyUrl": "http://your-proxy-host:8080"
+      },
       "agent": {
         "corpId": "企业 CorpID",
         "corpSecret": "应用 Secret",
@@ -185,6 +188,15 @@ npm run test:e2e
 | `channels.wecom.agent.agentId` | number | 是 | 应用 Agent ID |
 | `channels.wecom.agent.token` | string | 是 | 回调 Token (用于验证签名) |
 | `channels.wecom.agent.encodingAesKey` | string | 是 | 回调 EncodingAESKey (43 位) |
+
+#### 网络代理配置 (可选)
+
+用于 Agent / Webhook 等外发请求走固定出口代理（适用于企业微信固定 IP 白名单场景）。
+
+| 配置项 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| `channels.wecom.network.egressProxyUrl` | string | 否 | 外发 HTTP(S) 代理地址，例如 `http://proxy:8080` |
+| `WECOM_EGRESS_PROXY_URL` | env | 否 | 环境变量方式配置代理，优先级高于 `channels.wecom.network.egressProxyUrl` |
 
 #### Webhook 配置 (可选)
 
