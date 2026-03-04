@@ -13,7 +13,7 @@ import { resolveWecomTarget } from "./target.js";
 import { webhookSendImage, webhookSendText, webhookUploadFile, webhookSendFile } from "./webhook-bot.js";
 import { normalizeWebhookPath, registerWebhookTarget } from "./webhook-targets.js";
 import { wecomFetch, setConfigProxyUrl } from "./http.js";
-import { createWecomRouteHandler } from "./http-handler.js";
+
 
 const AGENT_IMAGE_EXTS = new Set(["jpg", "jpeg", "png", "gif", "bmp"]);
 
@@ -726,30 +726,15 @@ export const wecomChannelPlugin = {
         config: ctx.cfg,
       });
 
-      // Register HTTP route with OpenClaw route framework.
-      // Uses registerPluginHttpRoute (new API in OpenClaw 2026.3.2+) for explicit
-      // path-based routing.  Falls back gracefully when the SDK is unavailable
-      // (older OpenClaw uses the legacy wildcard handler registered in index.js).
-      let unregisterBotRoute;
+      // HTTP routing is handled by the wildcard handler registered in
+      // index.js via api.registerHttpHandler. That handler bypasses gateway
+      // auth, which is required for WeCom webhook callbacks (they carry
+      // msg_signature, not Bearer tokens).
       const botPath = account.webhookPath || "/webhooks/wecom";
-      try {
-        const { registerPluginHttpRoute } = await import("openclaw/plugin-sdk");
-        unregisterBotRoute = registerPluginHttpRoute({
-          path: botPath,
-          pluginId: "wecom",
-          accountId: account.accountId,
-          log: (msg) => logger.info(msg),
-          handler: createWecomRouteHandler(normalizeWebhookPath(botPath)),
-        });
-        logger.info("WeCom Bot HTTP route registered", { path: botPath });
-      } catch {
-        // openclaw/plugin-sdk not available — rely on legacy registerHttpHandler.
-        logger.debug("registerPluginHttpRoute unavailable, using legacy handler", { path: botPath });
-      }
+      logger.info("WeCom Bot webhook path active", { path: botPath });
 
       // Register Agent inbound webhook if agent inbound is fully configured.
       let unregisterAgent;
-      let unregisterAgentRoute;
       // Per-account agent path: /webhooks/app for default, /webhooks/app/{accountId} for others.
       const agentInboundPath = account.accountId === DEFAULT_ACCOUNT_ID
         ? "/webhooks/app"
@@ -778,22 +763,6 @@ export const wecomChannelPlugin = {
             config: ctx.cfg,
           });
           logger.info("WeCom Agent inbound webhook registered", { path: agentInboundPath });
-
-          // Register agent inbound HTTP route (new API).
-          try {
-            const { registerPluginHttpRoute } = await import("openclaw/plugin-sdk");
-            unregisterAgentRoute = registerPluginHttpRoute({
-              path: agentInboundPath,
-              pluginId: "wecom",
-              accountId: account.accountId,
-              source: "agent-inbound",
-              log: (msg) => logger.info(msg),
-              handler: createWecomRouteHandler(normalizeWebhookPath(agentInboundPath)),
-            });
-            logger.info("WeCom Agent inbound HTTP route registered", { path: agentInboundPath });
-          } catch {
-            logger.debug("registerPluginHttpRoute unavailable for agent inbound, using legacy handler");
-          }
         }
       }
 
@@ -805,9 +774,7 @@ export const wecomChannelPlugin = {
         }
         messageBuffers.clear();
         unregister();
-        if (unregisterBotRoute) unregisterBotRoute();
         if (unregisterAgent) unregisterAgent();
-        if (unregisterAgentRoute) unregisterAgentRoute();
       };
 
       // Backward compatibility: older runtime may not pass abortSignal.

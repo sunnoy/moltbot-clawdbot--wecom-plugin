@@ -38,16 +38,18 @@ const plugin = {
     api.registerChannel({ plugin: wecomChannelPlugin });
     logger.info("WeCom channel registered");
 
-    // Register HTTP handler for webhooks.
-    // OpenClaw 2026.3.2+ removed registerHttpHandler; the primary route
-    // registration now happens in gateway.startAccount via registerPluginHttpRoute.
-    // Keep the legacy handler for backward compatibility with older versions.
-    if (typeof api.registerHttpHandler === "function") {
-      api.registerHttpHandler(wecomHttpHandler);
-      logger.info("WeCom HTTP handler registered (legacy wildcard)");
-    } else {
-      logger.info("WeCom: registerHttpHandler unavailable, routes registered via gateway lifecycle");
-    }
+    // Register webhook HTTP route with auth: "plugin" so gateway does NOT
+    // enforce Bearer-token auth. WeCom callbacks use msg_signature verification
+    // which the plugin handles internally.
+    // OpenClaw 3.2 removed registerHttpHandler; use registerHttpRoute with
+    // auth: "plugin" + match: "prefix" to handle all /webhooks/* paths.
+    api.registerHttpRoute({
+      path: "/webhooks",
+      handler: wecomHttpHandler,
+      auth: "plugin",
+      match: "prefix",
+    });
+    logger.info("WeCom HTTP route registered (auth: plugin, match: prefix)");
   },
 };
 

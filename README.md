@@ -37,7 +37,7 @@
 
 ## 前置要求
 
-- 已安装 [OpenClaw](https://github.com/openclaw/openclaw) (版本 2026.1.30+)
+- 已安装 [OpenClaw](https://github.com/openclaw/openclaw) (版本 2026.3.2+)
 - 企业微信管理后台权限，可创建智能机器人应用或自建应用
 - 可从企业微信访问的服务器地址（HTTP/HTTPS）
 
