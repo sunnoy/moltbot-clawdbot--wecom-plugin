@@ -79,16 +79,17 @@ function buildAccount(accountId, accountCfg) {
     agent?.corpId && agent?.corpSecret && agent?.agentId && agent?.token && agent?.encodingAesKey,
   );
 
+  const hasBotTokens = Boolean(accountCfg?.token && accountCfg?.encodingAesKey);
+  const defaultPath = accountId === DEFAULT_ACCOUNT_ID ? "/webhooks/wecom" : `/webhooks/wecom/${accountId}`;
+
   return {
     accountId,
     name: accountCfg?.name || accountId,
     enabled: accountCfg?.enabled !== false,
-    configured: Boolean(accountCfg?.token && accountCfg?.encodingAesKey) || agentConfigured,
+    configured: hasBotTokens || agentConfigured,
     token: accountCfg?.token || "",
     encodingAesKey: accountCfg?.encodingAesKey || "",
-    webhookPath:
-      accountCfg?.webhookPath ||
-      (accountId === DEFAULT_ACCOUNT_ID ? "/webhooks/wecom" : `/webhooks/wecom/${accountId}`),
+    webhookPath: accountCfg?.webhookPath || (hasBotTokens ? defaultPath : ""),
     config: accountCfg || {},
     agentConfigured,
     agentInboundConfigured,

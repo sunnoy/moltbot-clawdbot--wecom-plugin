@@ -47,15 +47,19 @@ export function getDynamicAgentConfig(config) {
     groupEnabled: wecom.groupChat?.enabled !== false,
     groupRequireMention: wecom.groupChat?.requireMention !== false,
     groupMentionPatterns: wecom.groupChat?.mentionPatterns || ["@"],
+    adminBypass: wecom.dynamicAgents?.adminBypass === true,
   };
 }
 
 /**
  * Decide whether this message context should route to a dynamic agent.
  */
-export function shouldUseDynamicAgent({ chatType, config }) {
+export function shouldUseDynamicAgent({ chatType, config, senderIsAdmin = false }) {
   const dynamicConfig = getDynamicAgentConfig(config);
   if (!dynamicConfig.enabled) {
+    return false;
+  }
+  if (senderIsAdmin && dynamicConfig.adminBypass) {
     return false;
   }
   if (chatType === "group") {

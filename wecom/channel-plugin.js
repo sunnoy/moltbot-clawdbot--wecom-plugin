@@ -92,6 +92,11 @@ export const wecomChannelPlugin = {
               description: "Enable per-user/per-group agent isolation",
               default: true,
             },
+            adminBypass: {
+              type: "boolean",
+              description: "When true, adminUsers bypass dynamic agent routing and use the default route",
+              default: false,
+            },
           },
         },
         dm: {
@@ -720,18 +725,18 @@ export const wecomChannelPlugin = {
         });
       }
 
-      const unregister = registerWebhookTarget({
-        path: account.webhookPath || "/webhooks/wecom",
-        account,
-        config: ctx.cfg,
-      });
-
-      // HTTP routing is handled by the wildcard handler registered in
-      // index.js via api.registerHttpHandler. That handler bypasses gateway
-      // auth, which is required for WeCom webhook callbacks (they carry
-      // msg_signature, not Bearer tokens).
-      const botPath = account.webhookPath || "/webhooks/wecom";
-      logger.info("WeCom Bot webhook path active", { path: botPath });
+      let unregister;
+      const botPath = account.webhookPath;
+      if (botPath) {
+        unregister = registerWebhookTarget({
+          path: botPath,
+          account,
+          config: ctx.cfg,
+        });
+        logger.info("WeCom Bot webhook path active", { path: botPath });
+      } else {
+        logger.debug("No Bot webhook path for this account, skipping", { accountId: account.accountId });
+      }
 
       // Register Agent inbound webhook if agent inbound is fully configured.
       let unregisterAgent;
@@ -773,7 +778,7 @@ export const wecomChannelPlugin = {
           clearTimeout(buf.timer);
         }
         messageBuffers.clear();
-        unregister();
+        if (unregister) unregister();
         if (unregisterAgent) unregisterAgent();
       };
 

@@ -241,12 +241,19 @@ export async function processInboundMessage({
 
   // Compute deterministic agent target for this conversation.
   const targetAgentId =
-    dynamicConfig.enabled && shouldUseDynamicAgent({ chatType: peerKind, config: account.config })
+    dynamicConfig.enabled
+    && shouldUseDynamicAgent({
+      chatType: peerKind,
+      config: account.config,
+      senderIsAdmin,
+    })
       ? generateAgentId(peerKind, peerId, account.accountId)
       : null;
 
+  // Resolve template directory: per-account or global.
+  const templateDir = account.config?.workspaceTemplate || config?.channels?.wecom?.workspaceTemplate;
   if (targetAgentId) {
-    await ensureDynamicAgentListed(targetAgentId);
+    await ensureDynamicAgentListed(targetAgentId, templateDir);
     logger.debug("Using dynamic agent", { agentId: targetAgentId, chatType: peerKind, peerId });
   } else if (senderIsAdmin) {
     logger.debug("Admin user, dynamic agent disabled for this chat type; falling back to default route", {

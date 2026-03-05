@@ -36,9 +36,13 @@ export function getWorkspaceTemplateDir(config) {
  * Copy template files into a newly created agent's workspace directory.
  * Only copies files that don't already exist (writeFileIfMissing semantics).
  * Silently skips if workspaceTemplate is not configured or directory is missing.
+ *
+ * @param {string} agentId
+ * @param {object} config - OpenClaw config
+ * @param {string} [overrideTemplateDir] - Optional per-account template directory
  */
-export function seedAgentWorkspace(agentId, config) {
-  const templateDir = getWorkspaceTemplateDir(config);
+export function seedAgentWorkspace(agentId, config, overrideTemplateDir) {
+  const templateDir = overrideTemplateDir || getWorkspaceTemplateDir(config);
   if (!templateDir) {
     return;
   }
@@ -114,7 +118,7 @@ export function upsertAgentIdOnlyEntry(cfg, agentId) {
   return changed;
 }
 
-export async function ensureDynamicAgentListed(agentId) {
+export async function ensureDynamicAgentListed(agentId, templateDir) {
   const normalizedId = String(agentId || "")
     .trim()
     .toLowerCase();
@@ -128,28 +132,22 @@ export async function ensureDynamicAgentListed(agentId) {
     return;
   }
 
-  const queue = getEnsureDynamicAgentWriteQueue()
+  const queue = (getEnsureDynamicAgentWriteQueue() || Promise.resolve())
     .then(async () => {
-      const latestConfig = configRuntime.loadConfig();
-      if (!latestConfig || typeof latestConfig !== "object") {
+      const openclawConfig = getOpenclawConfig();
+      if (!openclawConfig || typeof openclawConfig !== "object") {
         return;
       }
 
-      const changed = upsertAgentIdOnlyEntry(latestConfig, normalizedId);
+      // Upsert into memory only. Writing to config file is dangerous and can wipe user settings.
+      const changed = upsertAgentIdOnlyEntry(openclawConfig, normalizedId);
       if (changed) {
-        await configRuntime.writeConfigFile(latestConfig);
-        logger.info("WeCom: dynamic agent added to agents.list", { agentId: normalizedId });
+        logger.info("WeCom: dynamic agent added to in-memory agents.list", { agentId: normalizedId });
       }
+      
       // Always attempt seeding so recreated/cleaned dynamic agents can recover
-      // template files even when the id already exists in agents.list.
-      seedAgentWorkspace(normalizedId, latestConfig);
-
-      // Keep runtime in-memory config aligned to avoid stale reads in this process.
-      const openclawConfig = getOpenclawConfig();
-      if (openclawConfig && typeof openclawConfig === "object") {
-        upsertAgentIdOnlyEntry(openclawConfig, normalizedId);
-        setOpenclawConfig(openclawConfig);
-      }
+      // template files.
+      seedAgentWorkspace(normalizedId, openclawConfig, templateDir);
 
       getEnsuredDynamicAgentIds().add(normalizedId);
     })

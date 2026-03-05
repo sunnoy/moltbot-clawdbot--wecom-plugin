@@ -292,12 +292,18 @@ async function processAgentMessage({
 
   const dynamicConfig = getDynamicAgentConfig(accountCfg);
   const targetAgentId =
-    dynamicConfig.enabled && shouldUseDynamicAgent({ chatType: peerKind, config: accountCfg })
+    dynamicConfig.enabled
+    && shouldUseDynamicAgent({
+      chatType: peerKind,
+      config: accountCfg,
+      senderIsAdmin,
+    })
       ? generateAgentId(peerKind, peerId, accountId)
       : null;
 
+  const templateDir = accountCfg?.workspaceTemplate || config?.channels?.wecom?.workspaceTemplate;
   if (targetAgentId) {
-    await ensureDynamicAgentListed(targetAgentId);
+    await ensureDynamicAgentListed(targetAgentId, templateDir);
     logger.debug("[agent-inbound] dynamic agent", { agentId: targetAgentId, peerId });
   }
 

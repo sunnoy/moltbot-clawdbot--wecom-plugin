@@ -21,7 +21,7 @@
 ### 动态 Agent 与隔离
 - **动态 Agent 管理**: 默认按"每个私聊用户 / 每个群聊"自动创建独立 Agent。每个 Agent 拥有独立的工作区与对话上下文，实现更强的数据隔离。
 - **群聊深度集成**: 支持群聊消息解析，可通过 @提及（At-mention）精准触发机器人响应。
-- **管理员用户**: 可配置管理员列表，绕过指令白名单和动态 Agent 路由限制。
+- **管理员用户**: 可配置管理员列表，默认绕过指令白名单；可选开启“绕过动态 Agent 路由”。
 - **指令白名单**: 内置常用指令支持（如 `/new`、`/status`），并提供指令白名单配置功能。
 
 ### 多媒体支持
@@ -152,7 +152,7 @@ npm run test:e2e
 | `plugins.entries.wecom.enabled` | boolean | 是 | 启用插件 |
 | `channels.wecom.token` | string | 是* | 企业微信机器人 Token (*Bot 模式必填) |
 | `channels.wecom.encodingAesKey` | string | 是* | 消息加密密钥（43 位）(*Bot 模式必填) |
-| `channels.wecom.adminUsers` | array | 否 | 管理员用户 ID 列表（绕过指令白名单和动态路由） |
+| `channels.wecom.adminUsers` | array | 否 | 管理员用户 ID 列表（绕过指令白名单） |
 | `channels.wecom.commands.enabled` | boolean | 否 | 是否启用指令白名单过滤（默认 true） |
 | `channels.wecom.commands.allowlist` | array | 否 | 允许的指令白名单 |
 
@@ -163,6 +163,7 @@ npm run test:e2e
 | 配置项 | 类型 | 必填 | 说明 |
 |--------|------|------|------|
 | `channels.wecom.dynamicAgents.enabled` | boolean | 否 | 是否启用动态 Agent（默认 true） |
+| `channels.wecom.dynamicAgents.adminBypass` | boolean | 否 | 管理员是否跳过动态 Agent 路由（默认 false） |
 | `channels.wecom.dm.createAgentOnFirstMessage` | boolean | 否 | 私聊时为每个用户创建独立 Agent（默认 true） |
 | `channels.wecom.groupChat.enabled` | boolean | 否 | 是否启用群聊处理（默认 true） |
 | `channels.wecom.groupChat.requireMention` | boolean | 否 | 群聊是否必须 @ 提及才响应（默认 true） |
@@ -295,13 +296,16 @@ Webhook Bot 用于向群聊发送通知消息。
 
 ## 管理员用户
 
-管理员用户可以绕过指令白名单限制，并跳过动态 Agent 路由（直接路由到主 Agent）。
+管理员用户默认可以绕过指令白名单限制。若希望管理员用户同时跳过动态 Agent 路由（直接路由到主 Agent），可开启 `dynamicAgents.adminBypass`。
 
 ```json
 {
   "channels": {
     "wecom": {
-      "adminUsers": ["user1", "user2"]
+      "adminUsers": ["user1", "user2"],
+      "dynamicAgents": {
+        "adminBypass": true
+      }
     }
   }
 }
@@ -322,7 +326,7 @@ Webhook Bot 用于向群聊发送通知消息。
    - **多账号群聊**: `wecom-<accountId>-group-<chatId>`
 2. OpenClaw 自动创建/复用对应的 Agent 工作区
 3. 每个用户/群聊拥有独立的对话历史和上下文
-4. **管理员用户**跳过动态路由，直接使用主 Agent
+4. 管理员用户默认参与动态路由；当 `dynamicAgents.adminBypass=true` 时跳过动态路由，直接使用主 Agent
 
 ### 高级配置
 
@@ -350,6 +354,7 @@ Webhook Bot 用于向群聊发送通知消息。
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
 | `dynamicAgents.enabled` | boolean | `true` | 是否启用动态 Agent |
+| `dynamicAgents.adminBypass` | boolean | `false` | 管理员是否跳过动态 Agent 路由 |
 | `dm.createAgentOnFirstMessage` | boolean | `true` | 私聊使用动态 Agent |
 | `groupChat.enabled` | boolean | `true` | 启用群聊处理 |
 | `groupChat.requireMention` | boolean | `true` | 群聊必须 @ 提及才响应 |
@@ -384,6 +389,7 @@ Webhook Bot 用于向群聊发送通知消息。
         "token": "Bot1 的 Token",
         "encodingAesKey": "Bot1 的 EncodingAESKey",
         "adminUsers": ["admin1"],
+        "workspaceTemplate": "/path/to/bot1-template",
         "agent": {
           "corpId": "企业 CorpID",
           "corpSecret": "Bot1 应用 Secret",
@@ -417,6 +423,7 @@ Webhook Bot 用于向群聊发送通知消息。
 | 完全兼容 | 旧的单账号配置（`token` 直接写在 `wecom` 下）自动识别为 `default` 账号，无需修改 |
 | Webhook 路径 | 自动按账号分配：`/webhooks/wecom/bot1`、`/webhooks/wecom/bot2` |
 | Agent 回调路径 | 自动按账号分配：`/webhooks/app/bot1`、`/webhooks/app/bot2` |
+| 工作区模板 | 支持按账号自定义：`channels.wecom.<accountId>.workspaceTemplate`（覆盖全局配置） |
 | 动态 Agent ID | 按账号隔离：`wecom-bot1-dm-{userId}`、`wecom-bot2-group-{chatId}` |
 | 冲突检测 | 启动时自动检测重复的 Token 或 Agent ID，避免消息路由错乱 |
 
