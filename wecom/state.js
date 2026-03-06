@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { WEBHOOK_BOT_SEND_URL } from "./constants.js";
+import { getWebhookBotSendUrl } from "./constants.js";
 import { resolveAgentConfigForAccount, resolveAccount } from "./accounts.js";
 
 const runtimeState = {
@@ -81,5 +81,5 @@ export function resolveWebhookUrl(name, accountId) {
   if (!webhooks || !webhooks[name]) return null;
   const value = webhooks[name];
   if (value.startsWith("http")) return value;
-  return `${WEBHOOK_BOT_SEND_URL}?key=${value}`;
+  return `${getWebhookBotSendUrl()}?key=${value}`;
 }

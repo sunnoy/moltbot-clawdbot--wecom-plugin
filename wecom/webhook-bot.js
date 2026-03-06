@@ -10,6 +10,7 @@
 import crypto from "node:crypto";
 import { logger } from "../logger.js";
 import { AGENT_API_REQUEST_TIMEOUT_MS } from "./constants.js";
+import { getWebhookBotUploadUrl } from "./constants.js";
 import { wecomFetch } from "./http.js";
 
 /**
@@ -76,7 +77,7 @@ export async function webhookSendImage({ url, base64, md5 }) {
  */
 export async function webhookUploadFile({ url, buffer, filename }) {
   const key = extractKey(url);
-  const uploadUrl = `https://qyapi.weixin.qq.com/cgi-bin/webhook/upload_media?key=${encodeURIComponent(key)}&type=file`;
+  const uploadUrl = `${getWebhookBotUploadUrl()}?key=${encodeURIComponent(key)}&type=file`;
 
   const boundary = `----WebKitFormBoundary${crypto.randomBytes(16).toString("hex")}`;
   const header = Buffer.from(

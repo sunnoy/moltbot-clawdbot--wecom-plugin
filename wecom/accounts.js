@@ -56,6 +56,15 @@ const RESERVED_KEYS = new Set([
   "allowFrom",
   "commandAllowlist",
   "commandBlockMessage",
+  // Top-level config keys that are NOT account IDs (issue #79).
+  "network",
+  "commands",
+  "dynamicAgents",
+  "dm",
+  "groupChat",
+  "adminUsers",
+  "workspaceTemplate",
+  "instances",
 ]);
 
 // ── Helpers ─────────────────────────────────────────────────────────

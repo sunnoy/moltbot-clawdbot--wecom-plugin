@@ -26,7 +26,7 @@ const plugin = {
   id: "wecom",
   name: "Enterprise WeChat",
   description: "Enterprise WeChat AI Bot channel plugin for OpenClaw",
-  configSchema: { type: "object", additionalProperties: false, properties: {} },
+  configSchema: { type: "object", additionalProperties: true, properties: {} },
   register(api) {
     logger.info("WeCom plugin registering...");
 

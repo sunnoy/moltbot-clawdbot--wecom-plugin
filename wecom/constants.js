@@ -40,13 +40,36 @@ export const MAIN_RESPONSE_IDLE_CLOSE_MS = 30 * 1000;
 export const SAFETY_NET_IDLE_CLOSE_MS = 90 * 1000;
 export const RESPONSE_URL_ERROR_BODY_PREVIEW_MAX = 300;
 
+// Default Agent API base URL (self-built application mode).
+// Can be overridden via `channels.wecom.network.apiBaseUrl` config or
+// `WECOM_API_BASE_URL` env var for users behind a reverse-proxy gateway
+// that relays requests to qyapi.weixin.qq.com (issue #79).
+const DEFAULT_API_BASE = "https://qyapi.weixin.qq.com";
+
+let _apiBase = DEFAULT_API_BASE;
+
+/**
+ * Set the API base URL from plugin config (called during plugin load).
+ * @param {string} url
+ */
+export function setApiBaseUrl(url) {
+  const trimmed = (url || "").trim().replace(/\/+$/, "");
+  _apiBase = trimmed || DEFAULT_API_BASE;
+}
+
+function apiBase() {
+  // Env var takes precedence over config.
+  const env = (process.env.WECOM_API_BASE_URL || "").trim().replace(/\/+$/, "");
+  return env || _apiBase;
+}
+
 // Agent API endpoints (self-built application mode).
 export const AGENT_API_ENDPOINTS = {
-  GET_TOKEN: "https://qyapi.weixin.qq.com/cgi-bin/gettoken",
-  SEND_MESSAGE: "https://qyapi.weixin.qq.com/cgi-bin/message/send",
-  SEND_APPCHAT: "https://qyapi.weixin.qq.com/cgi-bin/appchat/send",
-  UPLOAD_MEDIA: "https://qyapi.weixin.qq.com/cgi-bin/media/upload",
-  DOWNLOAD_MEDIA: "https://qyapi.weixin.qq.com/cgi-bin/media/get",
+  get GET_TOKEN() { return `${apiBase()}/cgi-bin/gettoken`; },
+  get SEND_MESSAGE() { return `${apiBase()}/cgi-bin/message/send`; },
+  get SEND_APPCHAT() { return `${apiBase()}/cgi-bin/appchat/send`; },
+  get UPLOAD_MEDIA() { return `${apiBase()}/cgi-bin/media/upload`; },
+  get DOWNLOAD_MEDIA() { return `${apiBase()}/cgi-bin/media/get`; },
 };
 
 export const TOKEN_REFRESH_BUFFER_MS = 60 * 1000;
@@ -54,5 +77,13 @@ export const AGENT_API_REQUEST_TIMEOUT_MS = 15 * 1000;
 export const MAX_REQUEST_BODY_SIZE = 1024 * 1024; // 1 MB
 
 // Webhook Bot endpoints (group robot notifications).
-export const WEBHOOK_BOT_SEND_URL = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send";
-export const WEBHOOK_BOT_UPLOAD_URL = "https://qyapi.weixin.qq.com/cgi-bin/webhook/upload_media";
+export const WEBHOOK_BOT_SEND_URL_DEFAULT = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send";
+export const WEBHOOK_BOT_UPLOAD_URL_DEFAULT = "https://qyapi.weixin.qq.com/cgi-bin/webhook/upload_media";
+
+// Dynamic getters so apiBaseUrl override applies to webhook bot too.
+export function getWebhookBotSendUrl() {
+  return `${apiBase()}/cgi-bin/webhook/send`;
+}
+export function getWebhookBotUploadUrl() {
+  return `${apiBase()}/cgi-bin/webhook/upload_media`;
+}

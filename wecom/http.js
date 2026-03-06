@@ -12,6 +12,7 @@
  *   3. Config: `channels.wecom.network.egressProxyUrl`
  */
 
+import { logger } from "../logger.js";
 import { AGENT_API_REQUEST_TIMEOUT_MS } from "./constants.js";
 
 // ── Lazy-loaded undici (optional dependency) ──────────────────────────
@@ -64,6 +65,7 @@ function mergeAbortSignal({ signal, timeoutMs }) {
 // ── Proxy URL resolution ──────────────────────────────────────────────
 
 let _configProxyUrl = "";
+let _proxyWarningLogged = false;
 
 /**
  * Set the proxy URL from plugin config (called once during plugin load).
@@ -118,7 +120,16 @@ export async function wecomFetch(input, init, opts) {
         dispatcher,
       });
     }
-    // undici not available — fall through to native fetch (no proxy)
+    // undici not available — log warning and fall through to native fetch (no proxy).
+    // This is a common cause of proxy misconfiguration (issue #79).
+    if (!_proxyWarningLogged) {
+      _proxyWarningLogged = true;
+      logger.error(
+        "[wecom/http] Proxy configured but undici is not available — requests will go DIRECT without proxy. " +
+        "Install undici (npm install undici) to enable proxy support.",
+        { proxyUrl },
+      );
+    }
   }
 
   // Native fetch (no proxy)

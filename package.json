@@ -1,6 +1,6 @@
 {
     "name": "@sunnoy/wecom",
-    "version": "1.7.1",
+    "version": "1.8.0",
     "description": "Enterprise WeChat AI Bot channel plugin for OpenClaw",
     "type": "module",
     "main": "index.js",

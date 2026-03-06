@@ -13,6 +13,7 @@ import { resolveWecomTarget } from "./target.js";
 import { webhookSendImage, webhookSendText, webhookUploadFile, webhookSendFile } from "./webhook-bot.js";
 import { normalizeWebhookPath, registerWebhookTarget } from "./webhook-targets.js";
 import { wecomFetch, setConfigProxyUrl } from "./http.js";
+import { setApiBaseUrl } from "./constants.js";
 
 
 const AGENT_IMAGE_EXTS = new Set(["jpg", "jpeg", "png", "gif", "bmp"]);
@@ -163,6 +164,10 @@ export const wecomChannelPlugin = {
             egressProxyUrl: {
               type: "string",
               description: "HTTP(S) proxy URL for outbound WeCom API requests (e.g. http://proxy:8080). Env var WECOM_EGRESS_PROXY_URL takes precedence.",
+            },
+            apiBaseUrl: {
+              type: "string",
+              description: "Custom WeCom API base URL (default: https://qyapi.weixin.qq.com). Use when routing through a reverse-proxy or API gateway. Env var WECOM_API_BASE_URL takes precedence.",
             },
           },
         },
@@ -739,6 +744,8 @@ export const wecomChannelPlugin = {
       // Wire proxy URL from config (env var takes precedence inside http.js).
       const wecomCfg = ctx.cfg?.channels?.wecom ?? {};
       setConfigProxyUrl(wecomCfg.network?.egressProxyUrl ?? "");
+      // Wire API base URL override (env var WECOM_API_BASE_URL takes precedence).
+      setApiBaseUrl(wecomCfg.network?.apiBaseUrl ?? "");
 
       // Conflict detection: warn about duplicate tokens / agent IDs.
       const conflicts = detectAccountConflicts(ctx.cfg);

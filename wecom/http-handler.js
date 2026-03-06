@@ -48,7 +48,13 @@ export async function wecomHttpHandler(req, res) {
   const targets = webhookTargets.get(path);
 
   if (!targets || targets.length === 0) {
-    return false; // Not handled by this plugin
+    // Return a proper HTTP response instead of `false`. Returning false tells
+    // OpenClaw 3.x "not handled", which causes the SPA catch-all to serve the
+    // chat UI on webhook paths (issue #81).
+    logger.debug("WeCom: no webhook target registered for path", { path });
+    res.writeHead(404, { "Content-Type": "text/plain" });
+    res.end(`No WeCom webhook target configured for ${path}`);
+    return true;
   }
 
   const query = Object.fromEntries(url.searchParams);
