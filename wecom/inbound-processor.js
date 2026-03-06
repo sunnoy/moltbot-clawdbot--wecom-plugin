@@ -50,16 +50,15 @@ export function flushMessageBuffer(streamKey, target) {
     const mergedContent = messages.map((m) => m.content || "").filter(Boolean).join("\n");
     primaryMsg.content = mergedContent;
 
-    // Merge image attachments.
-    const allImageUrls = messages.flatMap((m) => m.imageUrls || []);
-    if (allImageUrls.length > 0) {
-      primaryMsg.imageUrls = allImageUrls;
-    }
-    const singleImages = messages.map((m) => m.imageUrl).filter(Boolean);
-    if (singleImages.length > 0 && !primaryMsg.imageUrl) {
-      primaryMsg.imageUrl = singleImages[0];
-      if (singleImages.length > 1) {
-        primaryMsg.imageUrls = [...(primaryMsg.imageUrls || []), ...singleImages.slice(1)];
+    // Merge image attachments from all buffered messages.
+    // Collect single imageUrl fields first, then multi imageUrls arrays.
+    const allSingleImageUrls = messages.map((m) => m.imageUrl).filter(Boolean);
+    const allMultiImageUrls = messages.flatMap((m) => m.imageUrls || []);
+    const mergedImageUrls = [...allSingleImageUrls, ...allMultiImageUrls];
+    if (mergedImageUrls.length > 0) {
+      primaryMsg.imageUrl = mergedImageUrls[0];
+      if (mergedImageUrls.length > 1) {
+        primaryMsg.imageUrls = mergedImageUrls.slice(1);
       }
     }
 
@@ -324,7 +323,9 @@ export async function processInboundMessage({
   };
 
   // Download, decrypt, and attach media when present.
-  const allImageUrls = imageUrl ? [imageUrl] : imageUrls;
+  // Combine imageUrl (single) and imageUrls (array) so both are processed
+  // when a merged message carries values in both fields.
+  const allImageUrls = [imageUrl, ...imageUrls].filter(Boolean);
 
   if (allImageUrls.length > 0) {
     const mediaPaths = [];
