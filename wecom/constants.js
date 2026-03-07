@@ -30,6 +30,7 @@ export const BOOTSTRAP_FILENAMES = new Set([
   "USER.md",
   "HEARTBEAT.md",
   "BOOTSTRAP.md",
+  "system-prompt.md",
 ]);
 
 // Per-user message debounce buffer.

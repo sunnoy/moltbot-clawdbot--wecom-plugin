@@ -1,4 +1,5 @@
-import { copyFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { logger } from "../logger.js";
 import { BOOTSTRAP_FILENAMES } from "./constants.js";
@@ -10,6 +11,40 @@ import {
   setEnsureDynamicAgentWriteQueue,
   setOpenclawConfig,
 } from "./state.js";
+
+function expandTilde(p) {
+  if (!p || !p.startsWith("~")) return p;
+  return join(homedir(), p.slice(1));
+}
+
+// --- mtime caches for force-reseed ---
+const _templateMtimeCache = new Map();   // templateDir → { maxMtimeMs, checkedAt }
+const _agentSeedMtimeCache = new Map();  // `${templateDir}::${agentId}` → maxMtimeMs
+const TEMPLATE_MTIME_CACHE_TTL_MS = 60_000;
+
+function getTemplateMaxMtimeMs(templateDir) {
+  const now = Date.now();
+  const cached = _templateMtimeCache.get(templateDir);
+  if (cached && now - cached.checkedAt < TEMPLATE_MTIME_CACHE_TTL_MS) {
+    return cached.maxMtimeMs;
+  }
+
+  let maxMtimeMs = 0;
+  const files = readdirSync(templateDir);
+  for (const file of files) {
+    if (!BOOTSTRAP_FILENAMES.has(file)) continue;
+    const st = statSync(join(templateDir, file));
+    if (st.mtimeMs > maxMtimeMs) maxMtimeMs = st.mtimeMs;
+  }
+
+  _templateMtimeCache.set(templateDir, { maxMtimeMs, checkedAt: now });
+  return maxMtimeMs;
+}
+
+export function clearTemplateMtimeCache({ agentSeedCache = true } = {}) {
+  _templateMtimeCache.clear();
+  if (agentSeedCache) _agentSeedMtimeCache.clear();
+}
 
 /**
  * Resolve the agent workspace directory for a given agentId.
@@ -42,7 +77,8 @@ export function getWorkspaceTemplateDir(config) {
  * @param {string} [overrideTemplateDir] - Optional per-account template directory
  */
 export function seedAgentWorkspace(agentId, config, overrideTemplateDir) {
-  const templateDir = overrideTemplateDir || getWorkspaceTemplateDir(config);
+  const rawTemplateDir = overrideTemplateDir || getWorkspaceTemplateDir(config);
+  const templateDir = expandTilde(rawTemplateDir);
   if (!templateDir) {
     return;
   }
@@ -55,6 +91,15 @@ export function seedAgentWorkspace(agentId, config, overrideTemplateDir) {
   const workspaceDir = resolveAgentWorkspaceDirLocal(agentId);
 
   try {
+    const templateMaxMtimeMs = getTemplateMaxMtimeMs(templateDir);
+    const cacheKey = `${templateDir}::${agentId}`;
+    const lastSyncedMtimeMs = _agentSeedMtimeCache.get(cacheKey) ?? 0;
+    const isFirstSeed = lastSyncedMtimeMs === 0;
+
+    if (templateMaxMtimeMs <= lastSyncedMtimeMs && existsSync(workspaceDir)) {
+      return;
+    }
+
     mkdirSync(workspaceDir, { recursive: true });
 
     const files = readdirSync(templateDir);
@@ -62,13 +107,25 @@ export function seedAgentWorkspace(agentId, config, overrideTemplateDir) {
       if (!BOOTSTRAP_FILENAMES.has(file)) {
         continue;
       }
+      const src = join(templateDir, file);
       const dest = join(workspaceDir, file);
       if (existsSync(dest)) {
-        continue;
+        if (!isFirstSeed) {
+          const srcMtimeMs = statSync(src).mtimeMs;
+          const destMtimeMs = statSync(dest).mtimeMs;
+          if (srcMtimeMs <= destMtimeMs) {
+            continue;
+          }
+        }
+        copyFileSync(src, dest);
+        logger.info("WeCom: re-seeded workspace file", { agentId, file, isFirstSeed });
+      } else {
+        copyFileSync(src, dest);
+        logger.info("WeCom: seeded workspace file", { agentId, file });
       }
-      copyFileSync(join(templateDir, file), dest);
-      logger.info("WeCom: seeded workspace file", { agentId, file });
     }
+
+    _agentSeedMtimeCache.set(cacheKey, templateMaxMtimeMs);
   } catch (err) {
     logger.warn("WeCom: failed to seed agent workspace", {
       agentId,
