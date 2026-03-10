@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { getWebhookBotSendUrl } from "./constants.js";
-import { resolveAgentConfigForAccount, resolveAccount } from "./accounts.js";
+import { resolveAgentConfigForAccount, resolveDefaultAccountId, resolveAccount } from "./accounts.js";
 
 const runtimeState = {
   runtime: null,
@@ -10,13 +10,6 @@ const runtimeState = {
 };
 
 export const dispatchLocks = new Map();
-export const messageBuffers = new Map();
-export const webhookTargets = new Map();
-export const activeStreams = new Map();
-export const activeStreamHistory = new Map();
-export const lastStreamByKey = new Map();
-export const streamMeta = new Map();
-export const responseUrls = new Map();
 export const streamContext = new AsyncLocalStorage();
 
 export function setRuntime(runtime) {
@@ -50,36 +43,41 @@ export function setEnsureDynamicAgentWriteQueue(queuePromise) {
   runtimeState.ensureDynamicAgentWriteQueue = queuePromise;
 }
 
-/**
- * Extract Agent API config from the runtime openclaw config.
- * Returns null when Agent mode is not configured.
- *
- * @param {string} [accountId] - Optional account ID. When omitted, first tries
- *   the streamContext async store, then falls back to the default account.
- */
-export function resolveAgentConfig(accountId) {
-  const config = getOpenclawConfig();
-  // Determine effective accountId: explicit param > async context > default.
-  const effectiveId = accountId || streamContext.getStore()?.accountId || undefined;
-  return resolveAgentConfigForAccount(config, effectiveId);
+function resolveEffectiveAccountId(accountId) {
+  if (accountId) {
+    return accountId;
+  }
+  const contextual = streamContext.getStore()?.accountId;
+  if (contextual) {
+    return contextual;
+  }
+  return resolveDefaultAccountId(getOpenclawConfig());
 }
 
-/**
- * Resolve a webhook name to a full webhook URL.
- * Supports both full URLs and bare keys in config.
- * Returns null when the webhook name is not configured.
- *
- * @param {string} name - Webhook name from the `to` field (e.g. "ops-group")
- * @param {string} [accountId] - Optional account ID for multi-account lookup.
- * @returns {string|null}
- */
+export function resolveAgentConfig(accountId) {
+  return resolveAgentConfigForAccount(getOpenclawConfig(), resolveEffectiveAccountId(accountId));
+}
+
+export function resolveAccountConfig(accountId) {
+  return resolveAccount(getOpenclawConfig(), resolveEffectiveAccountId(accountId));
+}
+
 export function resolveWebhookUrl(name, accountId) {
-  const config = getOpenclawConfig();
-  const effectiveId = accountId || streamContext.getStore()?.accountId || undefined;
-  const account = resolveAccount(config, effectiveId);
-  const webhooks = account?.config?.webhooks;
-  if (!webhooks || !webhooks[name]) return null;
-  const value = webhooks[name];
-  if (value.startsWith("http")) return value;
+  const account = resolveAccountConfig(accountId);
+  const value = account?.config?.webhooks?.[name];
+  if (!value) {
+    return null;
+  }
+  if (String(value).startsWith("http")) {
+    return String(value);
+  }
   return `${getWebhookBotSendUrl()}?key=${value}`;
+}
+
+export function resetStateForTesting() {
+  runtimeState.runtime = null;
+  runtimeState.openclawConfig = null;
+  runtimeState.ensuredDynamicAgentIds = new Set();
+  runtimeState.ensureDynamicAgentWriteQueue = Promise.resolve();
+  dispatchLocks.clear();
 }

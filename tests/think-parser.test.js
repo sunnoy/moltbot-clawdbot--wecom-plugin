@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseThinkingContent } from "../think-parser.js";
+import { normalizeThinkingTags, parseThinkingContent } from "../think-parser.js";
 
 describe("parseThinkingContent", () => {
   it("returns empty for empty input", () => {
@@ -142,5 +142,23 @@ The answer is **42**.`;
     assert.equal(r.visibleContent, "思考中...");
     assert.equal(r.thinkingContent, "");
     assert.equal(r.isThinking, false);
+  });
+});
+
+describe("normalizeThinkingTags", () => {
+  it("normalizes supported think tag variants", () => {
+    const text = "<thinking>Step 1</thinking>\nDone\n<thought>Step 2</thought>";
+    assert.equal(
+      normalizeThinkingTags(text),
+      "<think>Step 1</think>\nDone\n<think>Step 2</think>",
+    );
+  });
+
+  it("keeps code regions unchanged", () => {
+    const text = "```html\n<thinking>demo</thinking>\n```\n<thought>real</thought>";
+    assert.equal(
+      normalizeThinkingTags(text),
+      "```html\n<thinking>demo</thinking>\n```\n<think>real</think>",
+    );
   });
 });

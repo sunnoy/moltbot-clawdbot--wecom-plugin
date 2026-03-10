@@ -1,0 +1,1164 @@
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
+import { createServer } from "node:http";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, it } from "node:test";
+import { logger } from "../logger.js";
+import { wecomChannelPlugin } from "../wecom/channel-plugin.js";
+import { getAccountTelemetry, resetRuntimeTelemetryForTesting } from "../wecom/runtime-telemetry.js";
+import { resetStateForTesting, setOpenclawConfig, setRuntime } from "../wecom/state.js";
+import { startWsMonitor } from "../wecom/ws-monitor.js";
+import { resetWsStateForTesting, setWsClient } from "../wecom/ws-state.js";
+
+class FakeWsClient extends EventEmitter {
+  constructor({ downloadMap = new Map() } = {}) {
+    super();
+    this.downloadMap = downloadMap;
+    this.isConnected = false;
+    this.connectCalls = 0;
+    this.disconnectCalls = 0;
+    this.replyStreamCalls = [];
+    this.replyWelcomeCalls = [];
+    this.sendMessageCalls = [];
+    this.downloadFileCalls = [];
+  }
+
+  connect() {
+    this.connectCalls += 1;
+    this.isConnected = true;
+    this.emit("connected");
+    return this;
+  }
+
+  disconnect() {
+    this.disconnectCalls += 1;
+    this.isConnected = false;
+    this.emit("disconnected", "manual");
+  }
+
+  async replyStream(frame, streamId, content, finish = false, msgItem) {
+    this.replyStreamCalls.push({
+      frame,
+      streamId,
+      content,
+      finish,
+      msgItem,
+    });
+    return { headers: { req_id: `reply-${streamId}` } };
+  }
+
+  async replyWelcome(frame, body) {
+    this.replyWelcomeCalls.push({ frame, body });
+    return { headers: { req_id: "welcome-reply" } };
+  }
+
+  async sendMessage(chatId, body) {
+    this.sendMessageCalls.push({ chatId, body });
+    return { headers: { req_id: `send-${chatId}` } };
+  }
+
+  async downloadFile(url, aesKey) {
+    this.downloadFileCalls.push({ url, aesKey });
+    const value = this.downloadMap.get(url);
+    if (value instanceof Error) {
+      throw value;
+    }
+    if (value) {
+      return value;
+    }
+    return {
+      buffer: Buffer.from("default-download"),
+      filename: path.basename(new URL(url).pathname || "/download.bin"),
+    };
+  }
+}
+
+function delay(ms = 0) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function eventually(assertion, { timeoutMs = 2_000, intervalMs = 20 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError;
+  while (Date.now() < deadline) {
+    try {
+      return await assertion();
+    } catch (error) {
+      lastError = error;
+      await delay(intervalMs);
+    }
+  }
+  throw lastError ?? new Error("condition not met in time");
+}
+
+function createWecomConfig(overrides = {}) {
+  return {
+    channels: {
+      wecom: {
+        botId: "bot-123",
+        secret: "secret-123",
+        sendThinkingMessage: false,
+        dmPolicy: "open",
+        allowFrom: ["*"],
+        groupPolicy: "open",
+        dynamicAgents: { enabled: false },
+        groupChat: {
+          enabled: true,
+          requireMention: false,
+        },
+        commands: {
+          enabled: false,
+        },
+        ...overrides,
+      },
+    },
+    agents: {
+      defaults: {
+        mediaMaxMb: 5,
+      },
+      list: [{ id: "main", default: true }],
+    },
+    session: {},
+  };
+}
+
+function createAccount(config) {
+  const agent = config.channels.wecom.agent;
+  return {
+    accountId: "default",
+    botId: config.channels.wecom.botId,
+    secret: config.channels.wecom.secret,
+    websocketUrl: "wss://example.invalid",
+    sendThinkingMessage: config.channels.wecom.sendThinkingMessage,
+    config: config.channels.wecom,
+    agentCredentials:
+      agent?.corpId && agent?.corpSecret && agent?.agentId
+        ? {
+            corpId: agent.corpId,
+            corpSecret: agent.corpSecret,
+            agentId: agent.agentId,
+          }
+        : null,
+  };
+}
+
+function createRuntime({
+  tempDir,
+  replyPayloadFactory = () => ({ text: "收到" }),
+  dispatchReply,
+  loadWebMedia = async () => ({
+    kind: "image",
+    contentType: "image/png",
+    buffer: Buffer.from("reply-image"),
+  }),
+} = {}) {
+  const ctxs = [];
+  const savedMedia = [];
+  const recordSessionMetaCalls = [];
+
+  const runtime = {
+    ctxs,
+    savedMedia,
+    recordSessionMetaCalls,
+    routing: {
+      resolveAgentRoute: ({ peer }) => ({
+        agentId: "main",
+        sessionKey: `session:${peer.kind}:${peer.id}`,
+      }),
+    },
+    reply: {
+      resolveEnvelopeFormatOptions: () => ({}),
+      formatAgentEnvelope: ({ body }) => body,
+      finalizeInboundContext: (ctx) => ctx,
+      dispatchReplyWithBufferedBlockDispatcher: async ({ ctx, dispatcherOptions, replyOptions }) => {
+        ctxs.push(ctx);
+        if (typeof dispatchReply === "function") {
+          await dispatchReply({ ctx, dispatcherOptions, replyOptions });
+          return;
+        }
+        const response = await replyPayloadFactory(ctx);
+        const steps = Array.isArray(response) ? response : response ? [response] : [];
+        for (const step of steps) {
+          await dispatcherOptions.deliver(
+            {
+              text: step.text ?? "",
+              mediaUrl: step.mediaUrl,
+              mediaUrls: step.mediaUrls,
+            },
+            { kind: step.kind ?? "final" },
+          );
+        }
+      },
+    },
+    session: {
+      resolveStorePath: () => path.join(tempDir, "sessions"),
+      readSessionUpdatedAt: () => null,
+      recordSessionMetaFromInbound: async (payload) => {
+        recordSessionMetaCalls.push(payload);
+      },
+    },
+    media: {
+      loadWebMedia,
+      fetchRemoteMedia: async ({ url }) => ({
+        buffer: Buffer.from(`fetched:${url}`),
+        contentType: "application/octet-stream",
+      }),
+      saveMediaBuffer: async (buffer, contentType, _surface, _maxBytes, filename) => {
+        const savedPath = path.join(tempDir, `${savedMedia.length}-${filename || "media.bin"}`);
+        savedMedia.push({
+          buffer,
+          contentType,
+          path: savedPath,
+          filename: filename || null,
+        });
+        return {
+          path: savedPath,
+          contentType,
+        };
+      },
+    },
+  };
+
+  return runtime;
+}
+
+function createMessageFrame(bodyOverrides = {}) {
+  const msgtype = bodyOverrides.msgtype ?? "text";
+  const baseBody = {
+    msgid: `msg-${randomUUID()}`,
+    aibotid: "bot-123",
+    chattype: "single",
+    from: { userid: "lirui" },
+    msgtype,
+  };
+
+  if (!("text" in bodyOverrides) && msgtype === "text") {
+    baseBody.text = { content: "hello" };
+  }
+
+  return {
+    headers: { req_id: `req-${randomUUID()}` },
+    body: {
+      ...baseBody,
+      ...bodyOverrides,
+    },
+  };
+}
+
+function createEventFrame(eventtype, overrides = {}) {
+  return {
+    headers: { req_id: `req-${randomUUID()}` },
+    body: {
+      msgid: `evt-${randomUUID()}`,
+      create_time: Math.floor(Date.now() / 1000),
+      aibotid: "bot-123",
+      chattype: "single",
+      from: { userid: "lirui" },
+      msgtype: "event",
+      event: { eventtype },
+      ...overrides,
+    },
+  };
+}
+
+async function startHarness({
+  configOverrides,
+  replyPayloadFactory,
+  dispatchReply,
+  downloadMap,
+  loadWebMedia,
+} = {}) {
+  const config = createWecomConfig(configOverrides);
+  const account = createAccount(config);
+  const runtime = createRuntime({
+    tempDir: process.env.OPENCLAW_STATE_DIR,
+    replyPayloadFactory,
+    dispatchReply,
+    loadWebMedia,
+  });
+  const wsClient = new FakeWsClient({ downloadMap });
+  setRuntime(runtime);
+  setOpenclawConfig(config);
+
+  const abortController = new AbortController();
+  const monitorPromise = startWsMonitor({
+    account,
+    config,
+    runtime,
+    abortSignal: abortController.signal,
+    wsClientFactory: () => wsClient,
+  });
+
+  await eventually(() => assert.equal(wsClient.connectCalls, 1));
+  wsClient.emit("authenticated");
+  await delay(10);
+
+  return {
+    account,
+    config,
+    runtime,
+    wsClient,
+    abortController,
+    async stop() {
+      abortController.abort();
+      await monitorPromise;
+    },
+    monitorPromise,
+  };
+}
+
+async function createAgentApiServer() {
+  const calls = {
+    getToken: 0,
+    uploads: [],
+    sends: [],
+    appchatSends: [],
+  };
+
+  const server = createServer(async (req, res) => {
+    const url = new URL(req.url, "http://127.0.0.1");
+    const chunks = [];
+    for await (const chunk of req) {
+      chunks.push(chunk);
+    }
+    const bodyBuffer = Buffer.concat(chunks);
+
+    if (url.pathname === "/cgi-bin/gettoken") {
+      calls.getToken += 1;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ access_token: "agent-token", expires_in: 7200 }));
+      return;
+    }
+
+    if (url.pathname === "/cgi-bin/media/upload") {
+      calls.uploads.push({
+        type: url.searchParams.get("type"),
+        bodyLength: bodyBuffer.length,
+      });
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ media_id: `media-${url.searchParams.get("type")}` }));
+      return;
+    }
+
+    if (url.pathname === "/cgi-bin/message/send") {
+      calls.sends.push(JSON.parse(bodyBuffer.toString("utf8")));
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ errcode: 0, errmsg: "ok" }));
+      return;
+    }
+
+    if (url.pathname === "/cgi-bin/appchat/send") {
+      calls.appchatSends.push(JSON.parse(bodyBuffer.toString("utf8")));
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ errcode: 0, errmsg: "ok" }));
+      return;
+    }
+
+    res.statusCode = 404;
+    res.end("not found");
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+
+  return {
+    calls,
+    apiBaseUrl: `http://127.0.0.1:${address.port}`,
+    async close() {
+      await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+    },
+  };
+}
+
+describe("WS e2e", () => {
+  let tempDir;
+  let originalStateDir;
+
+  beforeEach(async () => {
+    originalStateDir = process.env.OPENCLAW_STATE_DIR;
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "wecom-ws-e2e-"));
+    process.env.OPENCLAW_STATE_DIR = tempDir;
+    resetRuntimeTelemetryForTesting();
+    resetStateForTesting();
+    await resetWsStateForTesting();
+  });
+
+  afterEach(async () => {
+    resetRuntimeTelemetryForTesting();
+    resetStateForTesting();
+    await resetWsStateForTesting();
+    if (originalStateDir === undefined) {
+      delete process.env.OPENCLAW_STATE_DIR;
+    } else {
+      process.env.OPENCLAW_STATE_DIR = originalStateDir;
+    }
+    if (tempDir) {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("covers inbound text messages end-to-end", async () => {
+    const harness = await startHarness({
+      replyPayloadFactory: () => ({ text: "文本已收到" }),
+    });
+
+    try {
+      harness.wsClient.emit(
+        "message",
+        createMessageFrame({
+          msgtype: "text",
+          text: { content: "你好，机器人" },
+        }),
+      );
+
+      await eventually(() => assert.equal(harness.wsClient.replyStreamCalls.length, 1));
+      assert.equal(harness.runtime.ctxs.length, 1);
+      assert.equal(harness.runtime.ctxs[0].RawBody, "你好，机器人");
+      assert.equal(harness.wsClient.replyStreamCalls[0].content, "文本已收到");
+      assert.equal(harness.wsClient.replyStreamCalls[0].finish, true);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it("covers inbound image messages end-to-end", async () => {
+    const imageUrl = "https://example.com/input.png";
+    const harness = await startHarness({
+      replyPayloadFactory: () => ({ text: "图片已收到" }),
+      downloadMap: new Map([
+        [
+          imageUrl,
+          {
+            buffer: Buffer.from("png-data"),
+            filename: "input.png",
+          },
+        ],
+      ]),
+    });
+
+    try {
+      harness.wsClient.emit(
+        "message",
+        createMessageFrame({
+          msgtype: "image",
+          image: { url: imageUrl, aeskey: "img-aes" },
+        }),
+      );
+
+      await eventually(() => assert.equal(harness.wsClient.replyStreamCalls.length, 1));
+      assert.deepEqual(harness.wsClient.downloadFileCalls, [{ url: imageUrl, aesKey: "img-aes" }]);
+      assert.equal(harness.runtime.ctxs[0].Body, "[用户发送了一张图片]");
+      assert.equal(harness.runtime.ctxs[0].RawBody, "[图片]");
+      assert.deepEqual(harness.runtime.ctxs[0].MediaTypes, ["image/jpeg"]);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it("covers inbound mixed messages and passive reply images end-to-end", async () => {
+    const harness = await startHarness({
+      replyPayloadFactory: () => ({
+        text: "图文混排已收到",
+        mediaUrls: ["https://reply.example/final.png"],
+      }),
+      downloadMap: new Map([
+        [
+          "https://example.com/mixed-inbound.png",
+          {
+            buffer: Buffer.from("inbound-image"),
+            filename: "mixed-inbound.png",
+          },
+        ],
+      ]),
+      loadWebMedia: async () => ({
+        kind: "image",
+        contentType: "image/png",
+        buffer: Buffer.concat([
+          Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+          Buffer.from("reply-image"),
+        ]),
+      }),
+    });
+
+    try {
+      harness.wsClient.emit(
+        "message",
+        createMessageFrame({
+          msgtype: "mixed",
+          mixed: {
+            msg_item: [
+              { msgtype: "text", text: { content: "第一段" } },
+              { msgtype: "image", image: { url: "https://example.com/mixed-inbound.png", aeskey: "mixed-aes" } },
+              { msgtype: "text", text: { content: "第二段" } },
+            ],
+          },
+          quote: {
+            msgtype: "mixed",
+            mixed: {
+              msg_item: [
+                { msgtype: "text", text: { content: "引用内容" } },
+              ],
+            },
+          },
+        }),
+      );
+
+      await eventually(() => assert.equal(harness.wsClient.replyStreamCalls.length, 1));
+      assert.equal(harness.runtime.ctxs[0].RawBody, "> 引用内容\n\n第一段\n第二段");
+      assert.equal(harness.wsClient.replyStreamCalls[0].msgItem.length, 1);
+      assert.equal(harness.wsClient.replyStreamCalls[0].msgItem[0].msgtype, "image");
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it("parses MEDIA lines from passive reply text when mediaUrls are missing", async () => {
+    const workspaceDir = path.join(tempDir, "workspace");
+    const browserMediaDir = path.join(tempDir, "media", "browser");
+    const replyImagePath = path.join(workspaceDir, "reply.png");
+    await mkdir(path.dirname(replyImagePath), { recursive: true });
+    await writeFile(
+      replyImagePath,
+      Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        Buffer.from("reply-image"),
+      ]),
+    );
+
+    const harness = await startHarness({
+      replyPayloadFactory: () => ({
+        text: `截图如下\nMEDIA:${replyImagePath}`,
+      }),
+      loadWebMedia: async (mediaUrl, options) => {
+        assert.equal(mediaUrl, replyImagePath);
+        assert.deepEqual(options.localRoots, [workspaceDir, browserMediaDir]);
+        return {
+          kind: "image",
+          contentType: "image/png",
+          buffer: Buffer.concat([
+            Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+            Buffer.from("reply-image"),
+          ]),
+        };
+      },
+    });
+
+    try {
+      harness.wsClient.emit(
+        "message",
+        createMessageFrame({
+          msgtype: "text",
+          text: { content: "把截图发我" },
+        }),
+      );
+
+      await eventually(() => assert.equal(harness.wsClient.replyStreamCalls.length, 1));
+      assert.equal(harness.wsClient.replyStreamCalls[0].content, "截图如下");
+      assert.equal(harness.wsClient.replyStreamCalls[0].msgItem.length, 1);
+      assert.equal(harness.wsClient.replyStreamCalls[0].msgItem[0].msgtype, "image");
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it("parses FILE lines from passive reply text (guidance now in system prompt via hook)", async () => {
+    const workspaceDir = path.join(tempDir, "workspace");
+    const browserMediaDir = path.join(tempDir, "media", "browser");
+    const replyPdfPath = path.join(workspaceDir, "report.pdf");
+    await mkdir(path.dirname(replyPdfPath), { recursive: true });
+    await writeFile(replyPdfPath, Buffer.from("reply-pdf"));
+
+    const server = await createAgentApiServer();
+    const harness = await startHarness({
+      configOverrides: {
+        network: { apiBaseUrl: server.apiBaseUrl },
+        agent: {
+          corpId: "corp-passive-file-directive",
+          corpSecret: "corp-secret-passive-file-directive",
+          agentId: 2000005,
+        },
+      },
+      replyPayloadFactory: (ctx) => {
+        assert.equal(ctx.RawBody, "把 PDF 发我");
+        assert.equal(ctx.CommandBody, "把 PDF 发我");
+        // Guidance moved to system prompt via before_prompt_build hook;
+        // BodyForAgent is now the plain user message.
+        assert.equal(ctx.BodyForAgent, "把 PDF 发我");
+
+        return {
+          text: `附件如下\nFILE:${replyPdfPath}`,
+        };
+      },
+      loadWebMedia: async (mediaUrl, options) => {
+        assert.equal(mediaUrl, replyPdfPath);
+        assert.deepEqual(options.localRoots, [workspaceDir, browserMediaDir]);
+        return {
+          kind: "file",
+          contentType: "application/pdf",
+          buffer: Buffer.from("reply-pdf"),
+          fileName: "report.pdf",
+        };
+      },
+    });
+
+    try {
+      harness.wsClient.emit(
+        "message",
+        createMessageFrame({
+          msgtype: "text",
+          text: { content: "把 PDF 发我" },
+        }),
+      );
+
+      await eventually(() => assert.equal(harness.wsClient.replyStreamCalls.length, 1));
+      await eventually(() => assert.equal(server.calls.uploads.length, 1));
+      await eventually(() => assert.equal(server.calls.sends.length, 1));
+
+      assert.equal(
+        harness.wsClient.replyStreamCalls[0].content,
+        "附件如下\n\n由于当前企业微信bot不支持给用户发送文件，文件通过自建应用发送。",
+      );
+      assert.deepEqual(harness.wsClient.replyStreamCalls[0].msgItem, []);
+      assert.deepEqual(server.calls.uploads.map((entry) => entry.type), ["file"]);
+      assert.equal(server.calls.sends[0].msgtype, "file");
+      assert.equal(server.calls.sends[0].touser, "lirui");
+    } finally {
+      await harness.stop();
+      await server.close();
+    }
+  });
+
+  it("allows passive reply files from the trusted browser media directory", async () => {
+    const workspaceDir = path.join(tempDir, "workspace");
+    const browserMediaDir = path.join(tempDir, "media", "browser");
+    const browserPdfPath = path.join(browserMediaDir, "report.pdf");
+    await mkdir(path.dirname(browserPdfPath), { recursive: true });
+    await writeFile(browserPdfPath, Buffer.from("reply-pdf"));
+
+    const server = await createAgentApiServer();
+    const harness = await startHarness({
+      configOverrides: {
+        network: { apiBaseUrl: server.apiBaseUrl },
+        agent: {
+          corpId: "corp-outside-workspace",
+          corpSecret: "corp-secret-outside-workspace",
+          agentId: 2000006,
+        },
+      },
+      replyPayloadFactory: () => ({
+        text: `附件如下\nFILE:${browserPdfPath}`,
+      }),
+      loadWebMedia: async (mediaUrl, options) => {
+        assert.equal(mediaUrl, browserPdfPath);
+        assert.deepEqual(options.localRoots, [workspaceDir, browserMediaDir]);
+        return {
+          kind: "file",
+          contentType: "application/pdf",
+          buffer: Buffer.from("reply-pdf"),
+          fileName: "report.pdf",
+        };
+      },
+    });
+
+    try {
+      harness.wsClient.emit(
+        "message",
+        createMessageFrame({
+          msgtype: "text",
+          text: { content: "把 host PDF 发我" },
+        }),
+      );
+
+      await eventually(() => assert.equal(harness.wsClient.replyStreamCalls.length, 1));
+      assert.equal(
+        harness.wsClient.replyStreamCalls[0].content,
+        "附件如下\n\n由于当前企业微信bot不支持给用户发送文件，文件通过自建应用发送。",
+      );
+      assert.deepEqual(harness.wsClient.replyStreamCalls[0].msgItem, []);
+      await eventually(() => assert.equal(server.calls.uploads.length, 1));
+      await eventually(() => assert.equal(server.calls.sends.length, 1));
+    } finally {
+      await harness.stop();
+      await server.close();
+    }
+  });
+
+  it("rejects passive reply files outside the workspace and trusted browser media directory", async () => {
+    const workspaceDir = path.join(tempDir, "workspace");
+    const browserMediaDir = path.join(tempDir, "media", "browser");
+    const outsidePdfPath = path.join(tempDir, "agents", "other", "report.pdf");
+    await mkdir(path.dirname(outsidePdfPath), { recursive: true });
+    await writeFile(outsidePdfPath, Buffer.from("reply-pdf"));
+
+    const server = await createAgentApiServer();
+    const harness = await startHarness({
+      configOverrides: {
+        network: { apiBaseUrl: server.apiBaseUrl },
+        agent: {
+          corpId: "corp-outside-allowlist",
+          corpSecret: "corp-secret-outside-allowlist",
+          agentId: 2000007,
+        },
+      },
+      replyPayloadFactory: () => ({
+        text: `附件如下\nFILE:${outsidePdfPath}`,
+      }),
+      loadWebMedia: async (mediaUrl, options) => {
+        assert.equal(mediaUrl, outsidePdfPath);
+        assert.deepEqual(options.localRoots, [workspaceDir, browserMediaDir]);
+        throw new Error("Path escapes sandbox root");
+      },
+    });
+
+    try {
+      harness.wsClient.emit(
+        "message",
+        createMessageFrame({
+          msgtype: "text",
+          text: { content: "把 host PDF 发我" },
+        }),
+      );
+
+      await eventually(() => assert.equal(harness.wsClient.replyStreamCalls.length, 1));
+      assert.equal(harness.wsClient.replyStreamCalls[0].content, "附件如下");
+      assert.deepEqual(harness.wsClient.replyStreamCalls[0].msgItem, []);
+      await delay(50);
+      assert.deepEqual(server.calls.uploads, []);
+      assert.deepEqual(server.calls.sends, []);
+    } finally {
+      await harness.stop();
+      await server.close();
+    }
+  });
+
+  it("mirrors passive reply images to Agent API while keeping WS delivery", async () => {
+    const server = await createAgentApiServer();
+    const harness = await startHarness({
+      configOverrides: {
+        network: { apiBaseUrl: server.apiBaseUrl },
+        agent: {
+          corpId: "corp-passive-image",
+          corpSecret: "corp-secret-passive-image",
+          agentId: 2000001,
+        },
+      },
+      replyPayloadFactory: () => ({
+        text: "截图如下",
+        mediaUrls: ["https://reply.example/final.png"],
+      }),
+      loadWebMedia: async () => ({
+        kind: "image",
+        contentType: "image/png",
+        buffer: Buffer.concat([
+          Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+          Buffer.from("reply-image"),
+        ]),
+      }),
+    });
+
+    try {
+      harness.wsClient.emit(
+        "message",
+        createMessageFrame({
+          msgtype: "text",
+          text: { content: "把截图发我" },
+        }),
+      );
+
+      await eventually(() => assert.equal(harness.wsClient.replyStreamCalls.length, 1));
+      await eventually(() => assert.equal(server.calls.uploads.length, 1));
+      await eventually(() => assert.equal(server.calls.sends.length, 1));
+
+      assert.equal(harness.wsClient.replyStreamCalls[0].content, "截图如下");
+      assert.equal(harness.wsClient.replyStreamCalls[0].msgItem.length, 1);
+      assert.equal(server.calls.getToken, 1);
+      assert.deepEqual(server.calls.uploads.map((entry) => entry.type), ["image"]);
+      assert.equal(server.calls.sends[0].msgtype, "image");
+      assert.equal(server.calls.sends[0].touser, "lirui");
+    } finally {
+      await harness.stop();
+      await server.close();
+    }
+  });
+
+  it("surfaces passive file fallback in WS before sending the file through Agent API", async () => {
+    const server = await createAgentApiServer();
+    const harness = await startHarness({
+      configOverrides: {
+        network: { apiBaseUrl: server.apiBaseUrl },
+        agent: {
+          corpId: "corp-passive-file",
+          corpSecret: "corp-secret-passive-file",
+          agentId: 2000002,
+        },
+      },
+      replyPayloadFactory: () => ({
+        text: "附件如下",
+        mediaUrls: ["https://reply.example/report.pdf"],
+      }),
+      loadWebMedia: async () => ({
+        kind: "file",
+        contentType: "application/pdf",
+        buffer: Buffer.from("reply-pdf"),
+        fileName: "report.pdf",
+      }),
+    });
+
+    try {
+      harness.wsClient.emit(
+        "message",
+        createMessageFrame({
+          msgtype: "text",
+          text: { content: "把 PDF 发我" },
+        }),
+      );
+
+      await eventually(() => assert.equal(harness.wsClient.replyStreamCalls.length, 1));
+      await eventually(() => assert.equal(server.calls.uploads.length, 1));
+      await eventually(() => assert.equal(server.calls.sends.length, 1));
+
+      assert.equal(
+        harness.wsClient.replyStreamCalls[0].content,
+        "附件如下\n\n由于当前企业微信bot不支持给用户发送文件，文件通过自建应用发送。",
+      );
+      assert.deepEqual(harness.wsClient.replyStreamCalls[0].msgItem, []);
+      assert.deepEqual(server.calls.uploads.map((entry) => entry.type), ["file"]);
+      assert.equal(server.calls.sends[0].msgtype, "file");
+      assert.equal(server.calls.sends[0].touser, "lirui");
+    } finally {
+      await harness.stop();
+      await server.close();
+    }
+  });
+
+  it("surfaces a WS-only warning when passive file fallback has no Agent channel", async () => {
+    const harness = await startHarness({
+      replyPayloadFactory: () => ({
+        text: "附件如下",
+        mediaUrls: ["https://reply.example/report.pdf"],
+      }),
+      loadWebMedia: async () => ({
+        kind: "file",
+        contentType: "application/pdf",
+        buffer: Buffer.from("reply-pdf"),
+        fileName: "report.pdf",
+      }),
+    });
+
+    try {
+      harness.wsClient.emit(
+        "message",
+        createMessageFrame({
+          msgtype: "text",
+          text: { content: "把 PDF 发我" },
+        }),
+      );
+
+      await eventually(() => assert.equal(harness.wsClient.replyStreamCalls.length, 1));
+      assert.equal(
+        harness.wsClient.replyStreamCalls[0].content,
+        "附件如下\n\n由于当前企业微信bot不支持给用户发送文件，且当前未配置自建应用发送渠道。",
+      );
+      assert.deepEqual(harness.wsClient.replyStreamCalls[0].msgItem, []);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it("covers inbound voice messages end-to-end", async () => {
+    const harness = await startHarness({
+      replyPayloadFactory: () => ({ text: "语音已转文本" }),
+    });
+
+    try {
+      harness.wsClient.emit(
+        "message",
+        createMessageFrame({
+          msgtype: "voice",
+          voice: { content: "帮我总结一下" },
+        }),
+      );
+
+      await eventually(() => assert.equal(harness.wsClient.replyStreamCalls.length, 1));
+      assert.equal(harness.runtime.ctxs[0].RawBody, "帮我总结一下");
+      assert.equal(harness.wsClient.replyStreamCalls[0].content, "语音已转文本");
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it("covers inbound file messages end-to-end", async () => {
+    const fileUrl = "https://example.com/input.pdf";
+    const harness = await startHarness({
+      replyPayloadFactory: () => ({ text: "文件已收到" }),
+      downloadMap: new Map([
+        [
+          fileUrl,
+          {
+            buffer: Buffer.from("pdf-data"),
+            filename: "input.pdf",
+          },
+        ],
+      ]),
+    });
+
+    try {
+      harness.wsClient.emit(
+        "message",
+        createMessageFrame({
+          msgtype: "file",
+          file: { url: fileUrl, aeskey: "file-aes" },
+        }),
+      );
+
+      await eventually(() => assert.equal(harness.wsClient.replyStreamCalls.length, 1));
+      assert.deepEqual(harness.wsClient.downloadFileCalls, [{ url: fileUrl, aesKey: "file-aes" }]);
+      assert.equal(harness.runtime.ctxs[0].Body, "[用户发送了文件]");
+      assert.equal(harness.runtime.ctxs[0].RawBody, "[文件]");
+      assert.deepEqual(harness.runtime.ctxs[0].MediaTypes, ["application/octet-stream"]);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it("matches the official dynamic thinking stream behavior", async () => {
+    const harness = await startHarness({
+      configOverrides: {
+        sendThinkingMessage: true,
+      },
+      replyPayloadFactory: () => [
+        {
+          kind: "partial",
+          text: "<thinking>先分析问题",
+        },
+        {
+          kind: "final",
+          text: "，再给出结论</thinking>\n**最终答案**",
+        },
+      ],
+    });
+
+    try {
+      harness.wsClient.emit(
+        "message",
+        createMessageFrame({
+          msgtype: "text",
+          text: { content: "请开始推理" },
+        }),
+      );
+
+      await eventually(() => assert.equal(harness.wsClient.replyStreamCalls.length, 3));
+
+      const [thinkingFrame, streamingFrame, finalFrame] = harness.wsClient.replyStreamCalls;
+
+      assert.equal(thinkingFrame.content, "<think></think>");
+      assert.equal(thinkingFrame.finish, false);
+
+      assert.equal(streamingFrame.streamId, thinkingFrame.streamId);
+      assert.equal(streamingFrame.content, "<think>先分析问题");
+      assert.equal(streamingFrame.finish, false);
+
+      assert.equal(finalFrame.streamId, thinkingFrame.streamId);
+      assert.equal(finalFrame.content, "<think>先分析问题，再给出结论</think>\n**最终答案**");
+      assert.equal(finalFrame.finish, true);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it("bridges OpenClaw reasoning stream into WeCom think frames", async () => {
+    const harness = await startHarness({
+      configOverrides: {
+        sendThinkingMessage: true,
+      },
+      dispatchReply: async ({ dispatcherOptions, replyOptions }) => {
+        await replyOptions?.onReasoningStream?.({ text: "Reasoning:\n_先分析问题_" });
+        await replyOptions?.onReasoningStream?.({ text: "Reasoning:\n_先分析问题_\n_再给出结论_" });
+        await dispatcherOptions.deliver({ text: "**最终答案**" }, { kind: "final" });
+      },
+    });
+
+    try {
+      harness.wsClient.emit(
+        "message",
+        createMessageFrame({
+          msgtype: "text",
+          text: { content: "请展示思考流" },
+        }),
+      );
+
+      await eventually(() => assert.equal(harness.wsClient.replyStreamCalls.length, 4));
+
+      const [thinkingFrame, reasoningFrame1, reasoningFrame2, finalFrame] =
+        harness.wsClient.replyStreamCalls;
+
+      assert.equal(thinkingFrame.content, "<think></think>");
+      assert.equal(thinkingFrame.finish, false);
+
+      assert.equal(reasoningFrame1.streamId, thinkingFrame.streamId);
+      assert.equal(reasoningFrame1.content, "<think>先分析问题");
+      assert.equal(reasoningFrame1.finish, false);
+
+      assert.equal(reasoningFrame2.streamId, thinkingFrame.streamId);
+      assert.equal(reasoningFrame2.content, "<think>先分析问题\n再给出结论");
+      assert.equal(reasoningFrame2.finish, false);
+
+      assert.equal(finalFrame.streamId, thinkingFrame.streamId);
+      assert.equal(finalFrame.content, "<think>先分析问题\n再给出结论</think>\n**最终答案**");
+      assert.equal(finalFrame.finish, true);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it("covers enter_chat, template_card_event, feedback_event and disconnected_event", async () => {
+    const infoLogs = [];
+    const originalInfo = logger.info.bind(logger);
+    logger.info = (message, context) => {
+      infoLogs.push({ message, context });
+    };
+
+    const harness = await startHarness({
+      replyPayloadFactory: () => null,
+      configOverrides: {
+        welcomeMessage: "欢迎使用企业微信机器人",
+      },
+    });
+
+    try {
+      harness.wsClient.emit("event.enter_chat", createEventFrame("enter_chat"));
+      await eventually(() => assert.equal(harness.wsClient.replyWelcomeCalls.length, 1));
+      assert.equal(
+        harness.wsClient.replyWelcomeCalls[0].body.text.content,
+        "欢迎使用企业微信机器人",
+      );
+
+      harness.wsClient.emit("event.template_card_event", createEventFrame("template_card_event"));
+      harness.wsClient.emit("event.feedback_event", createEventFrame("feedback_event"));
+      await eventually(() => {
+        assert.ok(infoLogs.some((entry) => entry.message.includes("Template card event received")));
+        assert.ok(infoLogs.some((entry) => entry.message.includes("Feedback event received")));
+      });
+
+      harness.wsClient.emit("event.disconnected_event", createEventFrame("disconnected_event"));
+      await assert.rejects(harness.monitorPromise, /taken over by another connection/);
+      assert.ok(harness.wsClient.disconnectCalls >= 1);
+      assert.equal(getAccountTelemetry("default").connection.displaced, true);
+    } finally {
+      logger.info = originalInfo;
+    }
+  });
+
+  it("covers outbound sendText over WS", async () => {
+    const wsClient = new FakeWsClient();
+    wsClient.isConnected = true;
+    setWsClient("default", wsClient);
+
+    const cfg = createWecomConfig();
+    setOpenclawConfig(cfg);
+
+    const result = await wecomChannelPlugin.outbound.sendText({
+      cfg,
+      to: "wecom:lirui",
+      text: "主动消息",
+      accountId: "default",
+    });
+
+    assert.equal(result.chatId, "lirui");
+    assert.equal(wsClient.sendMessageCalls.length, 1);
+    assert.equal(wsClient.sendMessageCalls[0].chatId, "lirui");
+    assert.deepEqual(wsClient.sendMessageCalls[0].body, {
+      msgtype: "markdown",
+      markdown: { content: "主动消息" },
+    });
+  });
+
+  it("covers outbound file send through Agent with WS notice", async () => {
+    const server = await createAgentApiServer();
+    const wsClient = new FakeWsClient();
+    wsClient.isConnected = true;
+    setWsClient("default", wsClient);
+
+    const filePath = path.join(tempDir, "report.pdf");
+    await writeFile(filePath, Buffer.from("pdf"));
+
+    const cfg = createWecomConfig({
+      network: { apiBaseUrl: server.apiBaseUrl },
+      agent: {
+        corpId: "corp-id",
+        corpSecret: "corp-secret",
+        agentId: 1000001,
+      },
+    });
+    setOpenclawConfig(cfg);
+
+    try {
+      await wecomChannelPlugin.outbound.sendMedia({
+        cfg,
+        to: "wecom:lirui",
+        text: "附件如下",
+        mediaUrl: filePath,
+        accountId: "default",
+      });
+
+      assert.equal(server.calls.getToken, 1);
+      assert.deepEqual(server.calls.uploads.map((entry) => entry.type), ["file"]);
+      assert.equal(server.calls.sends.length, 1);
+      assert.equal(server.calls.sends[0].msgtype, "file");
+      assert.equal(server.calls.sends[0].touser, "lirui");
+      assert.equal(wsClient.sendMessageCalls.length, 1);
+      assert.ok(
+        wsClient.sendMessageCalls[0].body.markdown.content.includes(
+          "由于当前企业微信bot不支持给用户发送文件，文件通过自建应用发送。",
+        ),
+      );
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("covers outbound image send through Agent with WS notice", async () => {
+    const server = await createAgentApiServer();
+    const wsClient = new FakeWsClient();
+    wsClient.isConnected = true;
+    setWsClient("default", wsClient);
+
+    const imagePath = path.join(tempDir, "diagram.png");
+    await writeFile(imagePath, Buffer.from("png"));
+
+    const cfg = createWecomConfig({
+      network: { apiBaseUrl: server.apiBaseUrl },
+      agent: {
+        corpId: "corp-id",
+        corpSecret: "corp-secret",
+        agentId: 1000001,
+      },
+    });
+    setOpenclawConfig(cfg);
+
+    try {
+      await wecomChannelPlugin.outbound.sendMedia({
+        cfg,
+        to: "wecom:lirui",
+        text: "图片如下",
+        mediaUrl: imagePath,
+        accountId: "default",
+      });
+
+      assert.deepEqual(server.calls.uploads.map((entry) => entry.type), ["image"]);
+      assert.equal(server.calls.sends.length, 1);
+      assert.equal(server.calls.sends[0].msgtype, "image");
+      assert.equal(wsClient.sendMessageCalls.length, 1);
+      assert.ok(
+        wsClient.sendMessageCalls[0].body.markdown.content.includes(
+          "由于当前企业微信bot不支持直接发送图片，图片通过自建应用发送。",
+        ),
+      );
+    } finally {
+      await server.close();
+    }
+  });
+});

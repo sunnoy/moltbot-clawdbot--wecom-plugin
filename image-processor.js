@@ -6,7 +6,7 @@ import { logger } from "./logger.js";
  * Image Processing Module for WeCom
  *
  * Handles loading, validating, and encoding images for WeCom msg_item
- * Supports JPG and PNG formats up to 2MB
+ * Supports JPG and PNG formats up to 10MB
  */
 
 // Image format signatures (magic bytes)
@@ -15,8 +15,27 @@ const IMAGE_SIGNATURES = {
   PNG: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
 };
 
-// 2MB size limit (before base64 encoding)
-const MAX_IMAGE_SIZE = 2 * 1024 * 1024;
+// 10MB size limit (before base64 encoding)
+const MAX_IMAGE_SIZE = 10 * 1024 * 1024;
+
+/**
+ * Process a raw image buffer into a WeCom msg_item payload.
+ * @param {Buffer} buffer
+ * @returns {{ base64: string, md5: string, format: string, size: number }}
+ */
+export function prepareImageBufferForMsgItem(buffer) {
+  validateImageSize(buffer);
+  const format = detectImageFormat(buffer);
+  const base64 = encodeImageToBase64(buffer);
+  const md5 = calculateMD5(buffer);
+
+  return {
+    base64,
+    md5,
+    format,
+    size: buffer.length,
+  };
+}
 
 /**
  * Load image file from filesystem
@@ -65,14 +84,14 @@ export function calculateMD5(buffer) {
 /**
  * Validate image size is within limits
  * @param {Buffer} buffer - Image data buffer
- * @throws {Error} If size exceeds 2MB limit
+ * @throws {Error} If size exceeds 10MB limit
  */
 export function validateImageSize(buffer) {
   const sizeBytes = buffer.length;
   const sizeMB = (sizeBytes / 1024 / 1024).toFixed(2);
 
   if (sizeBytes > MAX_IMAGE_SIZE) {
-    throw new Error(`Image size ${sizeMB}MB exceeds 2MB limit (actual: ${sizeBytes} bytes)`);
+    throw new Error(`Image size ${sizeMB}MB exceeds 10MB limit (actual: ${sizeBytes} bytes)`);
   }
 
   logger.debug("Image size validated", { sizeBytes, sizeMB });
@@ -135,33 +154,17 @@ export async function prepareImageForMsgItem(filePath) {
   try {
     // Step 1: Load image
     const buffer = await loadImageFromPath(filePath);
-
-    // Step 2: Validate size
-    validateImageSize(buffer);
-
-    // Step 3: Detect format
-    const format = detectImageFormat(buffer);
-
-    // Step 4: Encode to base64
-    const base64 = encodeImageToBase64(buffer);
-
-    // Step 5: Calculate MD5
-    const md5 = calculateMD5(buffer);
+    const result = prepareImageBufferForMsgItem(buffer);
 
     logger.info("Image processed successfully", {
       filePath,
-      format,
-      size: buffer.length,
-      md5,
-      base64Length: base64.length,
+      format: result.format,
+      size: result.size,
+      md5: result.md5,
+      base64Length: result.base64.length,
     });
 
-    return {
-      base64,
-      md5,
-      format,
-      size: buffer.length,
-    };
+    return result;
   } catch (error) {
     logger.error("Image processing failed", {
       filePath,

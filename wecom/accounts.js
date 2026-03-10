@@ -1,249 +1,304 @@
-/**
- * Multi-account resolution layer.
- *
- * Design: dictionary-based — each key under `channels.wecom` is an account ID,
- * and its value contains the full per-account config (token, encodingAesKey,
- * agent, webhooks, etc.).
- *
- * Legacy single-account configs (where `token` exists directly under `wecom`)
- * are auto-detected and treated as accountId = "default".
- *
- * ── Multi-account config ───────────────────────────────────────────
- *
- *   channels:
- *     wecom:
- *       bot1:
- *         token: "bot-token-a"
- *         encodingAesKey: "..."
- *         agent:
- *           corpId: "ww1234"
- *           corpSecret: "secret-a"
- *           agentId: 1000001
- *         webhooks:
- *           ops-group: "key-xxx"
- *       bot2:
- *         token: "bot-token-b"
- *         encodingAesKey: "..."
- *         agent:
- *           corpId: "ww5678"
- *           corpSecret: "secret-b"
- *           agentId: 1000002
- *
- * ── Legacy single-account config (auto-detected, fully compatible) ─
- *
- *   channels:
- *     wecom:
- *       token: "bot-token-a"
- *       encodingAesKey: "..."
- *       agent:
- *         corpId: "ww1234"
- *         corpSecret: "secret-a"
- *         agentId: 1000001
- */
-
 import { logger } from "../logger.js";
-import { DEFAULT_ACCOUNT_ID } from "./constants.js";
+import { DEFAULT_ACCOUNT_ID, DEFAULT_WS_URL } from "./constants.js";
 
-// Keys that belong to the top-level wecom config and are NOT account IDs.
 const RESERVED_KEYS = new Set([
   "enabled",
-  "token",
-  "encodingAesKey",
-  "agent",
-  "webhooks",
-  "webhookPath",
   "name",
+  "botId",
+  "secret",
+  "websocketUrl",
+  "sendThinkingMessage",
+  "welcomeMessage",
   "allowFrom",
-  "commandAllowlist",
-  "commandBlockMessage",
-  // Top-level config keys that are NOT account IDs (issue #79).
-  "network",
+  "dmPolicy",
+  "groupPolicy",
+  "groupAllowFrom",
+  "groups",
   "commands",
   "dynamicAgents",
   "dm",
   "groupChat",
   "adminUsers",
   "workspaceTemplate",
-  "instances",
+  "agent",
+  "webhooks",
+  "network",
+  "defaultAccount",
 ]);
 
-// ── Helpers ─────────────────────────────────────────────────────────
+const SHARED_MULTI_ACCOUNT_KEYS = new Set([
+  "enabled",
+  "websocketUrl",
+  "sendThinkingMessage",
+  "welcomeMessage",
+  "allowFrom",
+  "dmPolicy",
+  "groupPolicy",
+  "groupAllowFrom",
+  "groups",
+  "commands",
+  "dynamicAgents",
+  "dm",
+  "groupChat",
+  "adminUsers",
+  "workspaceTemplate",
+  "agent",
+  "webhooks",
+  "network",
+]);
 
-/**
- * Detect whether the wecom config block is legacy (single-account) format.
- * Heuristic: if `token` exists directly under `channels.wecom`, it's legacy.
- */
-function isLegacyConfig(wecom) {
-  return typeof wecom?.token === "string";
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-/**
- * Build a resolved account object from a per-account config block.
- */
-function buildAccount(accountId, accountCfg) {
-  const agent = accountCfg?.agent;
-  const webhooks = accountCfg?.webhooks;
-  const agentConfigured = Boolean(agent?.corpId && agent?.corpSecret && agent?.agentId);
-  const agentInboundConfigured = Boolean(
-    agent?.corpId && agent?.corpSecret && agent?.agentId && agent?.token && agent?.encodingAesKey,
-  );
+function normalizeAccountKey(value) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, "_");
+}
 
-  const hasBotTokens = Boolean(accountCfg?.token && accountCfg?.encodingAesKey);
-  const defaultPath = accountId === DEFAULT_ACCOUNT_ID ? "/webhooks/wecom" : `/webhooks/wecom/${accountId}`;
+function cloneValue(value) {
+  if (Array.isArray(value)) {
+    return value.map((entry) => cloneValue(entry));
+  }
+  if (!isPlainObject(value)) {
+    return value;
+  }
+  const cloned = {};
+  for (const [key, entry] of Object.entries(value)) {
+    cloned[key] = cloneValue(entry);
+  }
+  return cloned;
+}
+
+function pruneEmptyObjects(value) {
+  if (Array.isArray(value)) {
+    return value.map((entry) => pruneEmptyObjects(entry));
+  }
+  if (!isPlainObject(value)) {
+    return value;
+  }
+
+  const next = {};
+  for (const [key, entry] of Object.entries(value)) {
+    const pruned = pruneEmptyObjects(entry);
+    if (pruned === undefined) {
+      continue;
+    }
+    if (isPlainObject(pruned) && Object.keys(pruned).length === 0) {
+      continue;
+    }
+    next[key] = pruned;
+  }
+  return next;
+}
+
+function mergeConfig(base, override) {
+  const result = isPlainObject(base) ? cloneValue(base) : {};
+  for (const [key, value] of Object.entries(override ?? {})) {
+    if (value === undefined) {
+      delete result[key];
+      continue;
+    }
+    if (isPlainObject(value) && isPlainObject(result[key])) {
+      result[key] = mergeConfig(result[key], value);
+      continue;
+    }
+    result[key] = cloneValue(value);
+  }
+  return pruneEmptyObjects(result);
+}
+
+function getWecomConfig(cfg) {
+  return isPlainObject(cfg?.channels?.wecom) ? cfg.channels.wecom : {};
+}
+
+function getAccountEntries(wecom) {
+  const entries = [];
+  for (const [key, value] of Object.entries(wecom ?? {})) {
+    if (RESERVED_KEYS.has(key) || !isPlainObject(value)) {
+      continue;
+    }
+    const accountId = normalizeAccountKey(key);
+    if (!accountId) {
+      continue;
+    }
+    entries.push({ key, accountId, value });
+  }
+  return entries;
+}
+
+function hasDictionaryAccounts(wecom) {
+  return getAccountEntries(wecom).length > 0;
+}
+
+function getSharedMultiAccountConfig(wecom) {
+  const shared = {};
+  for (const [key, value] of Object.entries(wecom ?? {})) {
+    if (SHARED_MULTI_ACCOUNT_KEYS.has(key)) {
+      shared[key] = cloneValue(value);
+    }
+  }
+  return shared;
+}
+
+function findEntryByAccountId(wecom, accountId) {
+  return getAccountEntries(wecom).find((entry) => entry.accountId === accountId) ?? null;
+}
+
+function buildAccount(accountId, config, meta = {}) {
+  const safeConfig = isPlainObject(config) ? cloneValue(config) : {};
+  const agent = isPlainObject(safeConfig.agent) ? safeConfig.agent : {};
+  const botId = String(safeConfig.botId ?? "").trim();
+  const secret = String(safeConfig.secret ?? "").trim();
+  const websocketUrl = String(safeConfig.websocketUrl ?? DEFAULT_WS_URL).trim() || DEFAULT_WS_URL;
+  const enabled = safeConfig.enabled ?? Object.keys(safeConfig).length > 0;
+  const configured = Boolean(botId && secret);
+  const agentConfigured = Boolean(agent.corpId && agent.corpSecret && agent.agentId);
 
   return {
     accountId,
-    name: accountCfg?.name || accountId,
-    enabled: accountCfg?.enabled !== false,
-    configured: hasBotTokens || agentConfigured,
-    token: accountCfg?.token || "",
-    encodingAesKey: accountCfg?.encodingAesKey || "",
-    webhookPath: accountCfg?.webhookPath || (hasBotTokens ? defaultPath : ""),
-    config: accountCfg || {},
+    name: String(safeConfig.name ?? accountId ?? DEFAULT_ACCOUNT_ID).trim() || accountId,
+    enabled,
+    configured,
+    botId,
+    secret,
+    websocketUrl,
+    sendThinkingMessage: safeConfig.sendThinkingMessage !== false,
+    config: safeConfig,
+    configPath: meta.configPath ?? `channels.wecom.${accountId}`,
+    storageMode: meta.storageMode ?? "dictionary",
+    entryKey: meta.entryKey ?? accountId,
     agentConfigured,
-    agentInboundConfigured,
-    webhooksConfigured: Boolean(webhooks && Object.keys(webhooks).length > 0),
+    webhooksConfigured: isPlainObject(safeConfig.webhooks) && Object.keys(safeConfig.webhooks).length > 0,
     agentCredentials: agentConfigured
-      ? { corpId: agent.corpId, corpSecret: agent.corpSecret, agentId: agent.agentId }
+      ? {
+          corpId: String(agent.corpId),
+          corpSecret: String(agent.corpSecret),
+          agentId: agent.agentId,
+        }
       : null,
   };
 }
 
-/**
- * Normalize a raw account key → canonical ID (lowercase, safe chars only).
- */
-function normalizeAccountKey(key) {
-  return String(key).trim().toLowerCase().replace(/[^a-z0-9_-]/g, "_");
+function buildDisabledAccount(accountId) {
+  return buildAccount(
+    accountId,
+    { enabled: false },
+    { configPath: `channels.wecom.${accountId}`, storageMode: "dictionary", entryKey: accountId },
+  );
 }
 
-// ── Public API ──────────────────────────────────────────────────────
+export function isDictionaryAccountConfig(cfg) {
+  return hasDictionaryAccounts(getWecomConfig(cfg));
+}
 
-/**
- * List all configured account IDs.
- * Returns `["default"]` for legacy single-account configs.
- */
 export function listAccountIds(cfg) {
-  const wecom = cfg?.channels?.wecom;
-  if (!wecom || wecom.enabled === false) return [];
-
-  // Legacy single-account → just "default".
-  if (isLegacyConfig(wecom)) return [DEFAULT_ACCOUNT_ID];
-
-  // Dictionary mode — each non-reserved key is an account.
-  const ids = [];
-  for (const key of Object.keys(wecom)) {
-    if (RESERVED_KEYS.has(key)) continue;
-    const val = wecom[key];
-    if (val && typeof val === "object" && !Array.isArray(val)) {
-      const id = normalizeAccountKey(key);
-      if (id && !ids.includes(id)) ids.push(id);
-    }
+  const entries = getAccountEntries(getWecomConfig(cfg));
+  if (entries.length === 0) {
+    return [DEFAULT_ACCOUNT_ID];
   }
-
-  if (ids.length === 0) {
-    logger.warn("[accounts] wecom config has no account entries and no legacy token — returning empty");
-  }
-  return ids;
+  return [...new Set(entries.map((entry) => entry.accountId))].sort((left, right) => left.localeCompare(right));
 }
 
-/**
- * Resolve a single account by its ID.
- */
-export function resolveAccount(cfg, accountId) {
-  const wecom = cfg?.channels?.wecom;
-  if (!wecom) return null;
-
-  const resolvedId = accountId || DEFAULT_ACCOUNT_ID;
-
-  // Legacy single-account: the entire wecom block IS the account config.
-  if (isLegacyConfig(wecom)) {
-    if (resolvedId !== DEFAULT_ACCOUNT_ID) {
-      logger.warn(`[accounts] legacy config does not have account "${resolvedId}"`);
-      return buildAccount(resolvedId, { enabled: false });
-    }
-    return buildAccount(DEFAULT_ACCOUNT_ID, wecom);
-  }
-
-  // Dictionary mode: look up key (case-insensitive).
-  const normalizedId = normalizeAccountKey(resolvedId);
-  for (const key of Object.keys(wecom)) {
-    if (RESERVED_KEYS.has(key)) continue;
-    if (normalizeAccountKey(key) === normalizedId) {
-      const val = wecom[key];
-      if (val && typeof val === "object" && !Array.isArray(val)) {
-        return buildAccount(normalizedId, val);
-      }
-    }
-  }
-
-  // Not found.
-  return buildAccount(resolvedId, { enabled: false });
-}
-
-/**
- * Resolve all accounts as a Map<accountId, account>.
- */
-export function resolveAllAccounts(cfg) {
+export function resolveDefaultAccountId(cfg) {
+  const preferred = normalizeAccountKey(getWecomConfig(cfg)?.defaultAccount);
   const ids = listAccountIds(cfg);
+  if (preferred && ids.includes(preferred)) {
+    return preferred;
+  }
+  if (ids.includes(DEFAULT_ACCOUNT_ID)) {
+    return DEFAULT_ACCOUNT_ID;
+  }
+  return ids[0] ?? DEFAULT_ACCOUNT_ID;
+}
+
+export function normalizeAccountId(accountId) {
+  return normalizeAccountKey(accountId) || DEFAULT_ACCOUNT_ID;
+}
+
+export function resolveAccount(cfg, accountId) {
+  const wecom = getWecomConfig(cfg);
+  const requestedId = normalizeAccountKey(accountId) || resolveDefaultAccountId(cfg);
+
+  if (!hasDictionaryAccounts(wecom)) {
+    if (requestedId !== DEFAULT_ACCOUNT_ID) {
+      return buildDisabledAccount(requestedId);
+    }
+    return buildAccount(DEFAULT_ACCOUNT_ID, wecom, {
+      configPath: "channels.wecom",
+      storageMode: "single",
+      entryKey: DEFAULT_ACCOUNT_ID,
+    });
+  }
+
+  const shared = getSharedMultiAccountConfig(wecom);
+  const entry = findEntryByAccountId(wecom, requestedId);
+  if (!entry) {
+    return buildDisabledAccount(requestedId);
+  }
+
+  return buildAccount(requestedId, mergeConfig(shared, entry.value), {
+    configPath: `channels.wecom.${entry.key}`,
+    storageMode: "dictionary",
+    entryKey: entry.key,
+  });
+}
+
+export function resolveAllAccounts(cfg) {
   const accounts = new Map();
-  for (const id of ids) {
-    accounts.set(id, resolveAccount(cfg, id));
+  for (const accountId of listAccountIds(cfg)) {
+    accounts.set(accountId, resolveAccount(cfg, accountId));
   }
   return accounts;
 }
 
-/**
- * Extract Agent API credentials for a given accountId.
- * Returns `{ corpId, corpSecret, agentId }` or null.
- */
 export function resolveAgentConfigForAccount(cfg, accountId) {
-  const account = resolveAccount(cfg, accountId);
-  return account?.agentCredentials ?? null;
+  return resolveAccount(cfg, accountId)?.agentCredentials ?? null;
 }
 
-/**
- * Detect duplicate tokens / agentIds across accounts.
- * Returns an array of conflict descriptions (empty = no conflicts).
- */
+export function resolveAllowFromForAccount(cfg, accountId) {
+  const account = resolveAccount(cfg, accountId);
+  const allowFrom = account?.config?.allowFrom;
+  return Array.isArray(allowFrom) ? allowFrom.map((entry) => String(entry)) : [];
+}
+
 export function detectAccountConflicts(cfg) {
-  const accounts = resolveAllAccounts(cfg);
   const conflicts = [];
+  const botOwners = new Map();
+  const agentOwners = new Map();
 
-  const tokenOwners = new Map();
-  const agentIdOwners = new Map();
+  for (const [accountId, account] of resolveAllAccounts(cfg)) {
+    if (!account.enabled) {
+      continue;
+    }
 
-  for (const [id, account] of accounts) {
-    if (!account.enabled) continue;
-
-    // Check bot token uniqueness.
-    const token = account.token?.trim();
-    if (token) {
-      const key = token.toLowerCase();
-      if (tokenOwners.has(key)) {
-        const owner = tokenOwners.get(key);
+    if (account.botId) {
+      const botKey = account.botId.toLowerCase();
+      if (botOwners.has(botKey)) {
+        const owner = botOwners.get(botKey);
         conflicts.push({
-          type: "duplicate_token",
-          accounts: [owner, id],
-          message: `账号 "${id}" 与 "${owner}" 使用了相同的 Bot Token，会导致消息错乱。`,
+          type: "duplicate_bot_id",
+          accounts: [owner, accountId],
+          message: `账号 "${accountId}" 与 "${owner}" 使用了相同的 botId。`,
         });
       } else {
-        tokenOwners.set(key, id);
+        botOwners.set(botKey, accountId);
       }
     }
 
-    // Check agent corpId+agentId uniqueness.
-    const creds = account.agentCredentials;
-    if (creds) {
-      const key = `${creds.corpId}:${creds.agentId}`;
-      if (agentIdOwners.has(key)) {
-        const owner = agentIdOwners.get(key);
+    if (account.agentCredentials) {
+      const agentKey = `${account.agentCredentials.corpId}:${account.agentCredentials.agentId}`;
+      if (agentOwners.has(agentKey)) {
+        const owner = agentOwners.get(agentKey);
         conflicts.push({
           type: "duplicate_agent",
-          accounts: [owner, id],
-          message: `账号 "${id}" 与 "${owner}" 使用了相同的 Agent 配置 (${creds.corpId}/${creds.agentId})。`,
+          accounts: [owner, accountId],
+          message: `账号 "${accountId}" 与 "${owner}" 使用了相同的 Agent 配置 (${account.agentCredentials.corpId}/${account.agentCredentials.agentId})。`,
         });
       } else {
-        agentIdOwners.set(key, id);
+        agentOwners.set(agentKey, accountId);
       }
     }
   }
@@ -251,18 +306,97 @@ export function detectAccountConflicts(cfg) {
   return conflicts;
 }
 
-/**
- * Find which accountId owns a given bot token.
- * Useful for inbound routing when the request carries a token.
- */
-export function findAccountByToken(cfg, token) {
-  if (!token) return null;
-  const key = token.trim().toLowerCase();
-  const accounts = resolveAllAccounts(cfg);
-  for (const [id, account] of accounts) {
-    if (account.enabled && account.token?.trim().toLowerCase() === key) {
-      return id;
-    }
+export function updateAccountConfig(cfg, accountId, patch, options = {}) {
+  const normalizedId = normalizeAccountKey(accountId) || DEFAULT_ACCOUNT_ID;
+  const wecom = getWecomConfig(cfg);
+  const nextChannels = { ...(cfg?.channels ?? {}) };
+
+  if (normalizedId === DEFAULT_ACCOUNT_ID && !hasDictionaryAccounts(wecom) && options.forceDictionary !== true) {
+    nextChannels.wecom = mergeConfig(wecom, patch);
+    return { ...cfg, channels: nextChannels };
   }
-  return null;
+
+  const nextWecom = { ...wecom };
+  const existingEntry = findEntryByAccountId(wecom, normalizedId);
+  const entryKey = existingEntry?.key ?? normalizedId;
+  const previousEntry = isPlainObject(nextWecom[entryKey]) ? nextWecom[entryKey] : {};
+  const nextEntry = mergeConfig(previousEntry, patch);
+
+  if (Object.keys(nextEntry).length > 0) {
+    nextWecom[entryKey] = nextEntry;
+  } else {
+    delete nextWecom[entryKey];
+  }
+
+  nextChannels.wecom = nextWecom;
+  return { ...cfg, channels: nextChannels };
+}
+
+export function setAccountConfig(cfg, accountId, patch, options = {}) {
+  return updateAccountConfig(cfg, accountId, patch, options);
+}
+
+export function setAccountEnabled({ cfg, accountId = DEFAULT_ACCOUNT_ID, enabled }) {
+  return updateAccountConfig(cfg, accountId, { enabled });
+}
+
+export function deleteAccount({ cfg, accountId = DEFAULT_ACCOUNT_ID }) {
+  return deleteAccountConfig(cfg, accountId);
+}
+
+export function clearAccountCredentials({ cfg, accountId = DEFAULT_ACCOUNT_ID }) {
+  return updateAccountConfig(
+    cfg,
+    accountId,
+    {
+      botId: "",
+      secret: "",
+      websocketUrl: undefined,
+    },
+    { forceDictionary: accountId !== DEFAULT_ACCOUNT_ID },
+  );
+}
+
+export function resolveAccountBasePath(cfg, accountId) {
+  const account = resolveAccount(cfg, accountId);
+  return account?.configPath ?? "channels.wecom";
+}
+
+export function deleteAccountConfig(cfg, accountId) {
+  const normalizedId = normalizeAccountKey(accountId) || DEFAULT_ACCOUNT_ID;
+  const wecom = getWecomConfig(cfg);
+  const nextChannels = { ...(cfg?.channels ?? {}) };
+
+  if (normalizedId === DEFAULT_ACCOUNT_ID && !hasDictionaryAccounts(wecom)) {
+    delete nextChannels.wecom;
+    return { ...cfg, channels: nextChannels };
+  }
+
+  const nextWecom = { ...wecom };
+  const existingEntry = findEntryByAccountId(wecom, normalizedId);
+  if (existingEntry) {
+    delete nextWecom[existingEntry.key];
+  }
+  nextChannels.wecom = nextWecom;
+  return { ...cfg, channels: nextChannels };
+}
+
+export function describeAccount(account) {
+  return {
+    accountId: account.accountId,
+    name: account.name,
+    enabled: account.enabled,
+    configured: account.configured,
+    botId: account.botId,
+    websocketUrl: account.websocketUrl,
+  };
+}
+
+export function logAccountConflicts(cfg) {
+  for (const conflict of detectAccountConflicts(cfg)) {
+    logger.error(`[wecom/accounts] ${conflict.message}`, {
+      type: conflict.type,
+      accounts: conflict.accounts,
+    });
+  }
 }

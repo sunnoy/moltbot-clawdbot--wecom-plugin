@@ -1,9 +1,10 @@
 /**
  * Parse <think>...</think> tags from LLM output.
  *
- * Separates content into visible text and thinking process for WeCom's
- * thinking_content stream field. Handles streaming (unclosed tags) and
- * ignores tags inside code blocks.
+ * Handles WeCom thinking tags in streamed LLM output:
+ * - normalize tag variants to <think></think> for outbound WS content
+ * - split visible/thinking text for analysis and tests
+ * - ignore tags inside code blocks
  */
 
 const QUICK_TAG_RE = /<\s*\/?\s*(?:think(?:ing)?|thought)\b/i;
@@ -44,12 +45,49 @@ function isInsideRegion(pos, regions) {
 }
 
 /**
+ * Normalize think tag variants to the canonical <think></think> form that
+ * WeCom clients recognize, while leaving code blocks untouched.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+export function normalizeThinkingTags(text) {
+  if (!text) {
+    return "";
+  }
+
+  if (!QUICK_TAG_RE.test(text)) {
+    return String(text);
+  }
+
+  const source = String(text);
+  const codeRegions = findCodeRegions(source);
+  const normalized = [];
+  let lastIndex = 0;
+
+  THINK_TAG_RE.lastIndex = 0;
+  for (const match of source.matchAll(THINK_TAG_RE)) {
+    const idx = match.index;
+    if (isInsideRegion(idx, codeRegions)) {
+      continue;
+    }
+
+    normalized.push(source.slice(lastIndex, idx));
+    normalized.push(match[1] === "/" ? "</think>" : "<think>");
+    lastIndex = idx + match[0].length;
+  }
+
+  normalized.push(source.slice(lastIndex));
+  return normalized.join("");
+}
+
+/**
  * Parse thinking content from text that may contain <think>...</think> tags.
  *
  * @param {string} text - Raw accumulated stream text
  * @returns {{ visibleContent: string, thinkingContent: string, isThinking: boolean }}
- *   - visibleContent: text with think blocks removed (for content field)
- *   - thinkingContent: concatenated thinking text (for thinking_content field)
+ *   - visibleContent: text with think blocks removed
+ *   - thinkingContent: concatenated thinking text
  *   - isThinking: true when an unclosed <think> tag is present (streaming)
  */
 export function parseThinkingContent(text) {
@@ -57,12 +95,14 @@ export function parseThinkingContent(text) {
     return { visibleContent: "", thinkingContent: "", isThinking: false };
   }
 
+  const source = String(text);
+
   // Fast path: no think tags at all.
-  if (!QUICK_TAG_RE.test(text)) {
-    return { visibleContent: text, thinkingContent: "", isThinking: false };
+  if (!QUICK_TAG_RE.test(source)) {
+    return { visibleContent: source, thinkingContent: "", isThinking: false };
   }
 
-  const codeRegions = findCodeRegions(text);
+  const codeRegions = findCodeRegions(source);
 
   const visibleParts = [];
   const thinkingParts = [];
@@ -70,7 +110,7 @@ export function parseThinkingContent(text) {
   let inThinking = false;
 
   THINK_TAG_RE.lastIndex = 0;
-  for (const match of text.matchAll(THINK_TAG_RE)) {
+  for (const match of source.matchAll(THINK_TAG_RE)) {
     const idx = match.index;
     const isClose = match[1] === "/";
 
@@ -79,7 +119,7 @@ export function parseThinkingContent(text) {
       continue;
     }
 
-    const segment = text.slice(lastIndex, idx);
+    const segment = source.slice(lastIndex, idx);
 
     if (!inThinking) {
       if (!isClose) {
@@ -103,7 +143,7 @@ export function parseThinkingContent(text) {
   }
 
   // Remaining text after the last tag.
-  const remaining = text.slice(lastIndex);
+  const remaining = source.slice(lastIndex);
   if (inThinking) {
     // Unclosed <think>: remaining text is part of thinking (streaming state).
     thinkingParts.push(remaining);

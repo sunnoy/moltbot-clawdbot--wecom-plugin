@@ -1,22 +1,8 @@
+import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
 import { logger } from "./logger.js";
-import { streamManager } from "./stream-manager.js";
 import { wecomChannelPlugin } from "./wecom/channel-plugin.js";
-import { wecomHttpHandler } from "./wecom/http-handler.js";
-import { responseUrls, setOpenclawConfig, setRuntime, streamMeta } from "./wecom/state.js";
-
-function emptyPluginConfigSchema() {
-  return {
-    safeParse(value) {
-      if (value === undefined) return { success: true, data: undefined };
-      if (!value || typeof value !== "object" || Array.isArray(value)) {
-        return { success: false, error: { message: "expected config object" } };
-      }
-      return { success: true, data: value };
-    },
-  };
-}
-
-let cleanupTimer = null;
+import { setOpenclawConfig, setRuntime } from "./wecom/state.js";
+import { buildReplyMediaGuidance } from "./wecom/ws-monitor.js";
 
 const plugin = {
   id: "wecom",
@@ -24,37 +10,18 @@ const plugin = {
   description: "Enterprise WeChat AI Bot channel plugin for OpenClaw",
   configSchema: emptyPluginConfigSchema(),
   register(api) {
-    logger.info("WeCom plugin registering...");
-
+    logger.info("Registering WeCom WS plugin");
     setRuntime(api.runtime);
     setOpenclawConfig(api.config);
-
-    if (cleanupTimer) clearInterval(cleanupTimer);
-    cleanupTimer = setInterval(() => {
-      const now = Date.now();
-      for (const streamId of streamMeta.keys()) {
-        if (!streamManager.hasStream(streamId)) {
-          streamMeta.delete(streamId);
-        }
-      }
-      for (const [key, entry] of responseUrls.entries()) {
-        if (now > entry.expiresAt) {
-          responseUrls.delete(key);
-        }
-      }
-    }, 60_000);
-    cleanupTimer.unref();
-
     api.registerChannel({ plugin: wecomChannelPlugin });
-    logger.info("WeCom channel registered");
 
-    api.registerHttpRoute({
-      path: "/webhooks",
-      handler: wecomHttpHandler,
-      auth: "plugin",
-      match: "prefix",
+    api.on("before_prompt_build", (_event, ctx) => {
+      if (ctx.channelId !== "wecom") {
+        return;
+      }
+      const guidance = buildReplyMediaGuidance(api.config, ctx.agentId);
+      return { appendSystemContext: guidance };
     });
-    logger.info("WeCom HTTP route registered (auth: plugin, match: prefix)");
   },
 };
 

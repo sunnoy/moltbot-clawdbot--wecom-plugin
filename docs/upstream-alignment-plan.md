@@ -1,7 +1,26 @@
-# WeCom 插件上游规范对齐方案
+# WeCom 插件上游规范对齐备忘（v1.x 历史参考）
 
 > 基于 OpenClaw 主仓库（extensions/feishu、extensions/synology-chat、extensions/googlechat 等）的实现模式，
 > 梳理 `openclaw-plugin-wecom` 需要调整的四个方面。
+
+---
+
+## 状态更新（2026-03-09）
+
+该文档仅保留为 v1.x / HTTP callback 分支的历史参考，主线设计已切换到：
+
+- [docs/v2-refactoring-plan.md](/home/lr/Downloads/open-code/openclaw-plugin-wecom/docs/v2-refactoring-plan.md)
+
+当前状态如下：
+
+| 项目 | 状态 | 说明 |
+|------|------|------|
+| `deliveryMode: "direct"` | 已完成 | 当前代码已补齐 |
+| plugin-level `configSchema` | 已完成 | 当前 `index.js` 已使用 `safeParse()` 风格空 schema |
+| Webhook 路由对齐 SDK | 已过时 | v2 主线不再保留 HTTP callback，因此不再推进该章节 |
+| `index.js` 顶层副作用清理 | 已完成 / 将随 v2 进一步简化 | v2 中 `responseUrls` / `streamMeta` 也会整体移除 |
+
+如果继续推进主线，请直接以 `docs/v2-refactoring-plan.md` 为准，不再按照本文的 HTTP 路由章节实施。
 
 ---
 

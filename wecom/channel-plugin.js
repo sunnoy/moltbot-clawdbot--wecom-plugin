@@ -1,280 +1,370 @@
-import { readFile } from "node:fs/promises";
 import crypto from "node:crypto";
 import { basename } from "node:path";
+import { readFile } from "node:fs/promises";
+import {
+  buildBaseAccountStatusSnapshot,
+  buildBaseChannelStatusSummary,
+  formatPairingApproveHint,
+} from "openclaw/plugin-sdk";
 import { logger } from "../logger.js";
-import { streamManager } from "../stream-manager.js";
-import { agentSendMedia, agentSendText, agentUploadMedia } from "./agent-api.js";
-import { listAccountIds, resolveAccount, detectAccountConflicts } from "./accounts.js";
-import { DEFAULT_ACCOUNT_ID, THINKING_PLACEHOLDER } from "./constants.js";
-import { parseResponseUrlResult } from "./response-url.js";
-import { messageBuffers, resolveAgentConfig, resolveWebhookUrl, responseUrls, streamContext } from "./state.js";
-import { resolveRecoverableStream, unregisterActiveStream } from "./stream-utils.js";
-import { resolveWecomTarget } from "./target.js";
-import { webhookSendImage, webhookSendText, webhookUploadFile, webhookSendFile } from "./webhook-bot.js";
-import { normalizeWebhookPath, registerWebhookTarget } from "./webhook-targets.js";
-import { wecomFetch, setConfigProxyUrl } from "./http.js";
-import { setApiBaseUrl } from "./constants.js";
 import { splitTextByByteLimit } from "../utils.js";
+import {
+  deleteAccountConfig,
+  describeAccount,
+  detectAccountConflicts,
+  listAccountIds,
+  logAccountConflicts,
+  resolveAccount,
+  resolveAllowFromForAccount,
+  resolveDefaultAccountId,
+  updateAccountConfig,
+} from "./accounts.js";
+import { agentSendMedia, agentSendText, agentUploadMedia } from "./agent-api.js";
+import { setConfigProxyUrl, wecomFetch } from "./http.js";
+import { wecomOnboardingAdapter } from "./onboarding.js";
+import { getAccountTelemetry, recordOutboundActivity } from "./runtime-telemetry.js";
+import { getRuntime, setOpenclawConfig } from "./state.js";
+import { resolveWecomTarget } from "./target.js";
+import { webhookSendFile, webhookSendImage, webhookSendMarkdown, webhookUploadFile } from "./webhook-bot.js";
+import {
+  CHANNEL_ID,
+  DEFAULT_ACCOUNT_ID,
+  DEFAULT_WS_URL,
+  TEXT_CHUNK_LIMIT,
+  getWebhookBotSendUrl,
+  setApiBaseUrl,
+} from "./constants.js";
+import { sendWsMessage, startWsMonitor } from "./ws-monitor.js";
 
+function normalizePairingEntry(entry) {
+  return String(entry ?? "")
+    .trim()
+    .replace(/^(wecom|wework):/i, "")
+    .replace(/^user:/i, "");
+}
 
-const AGENT_IMAGE_EXTS = new Set(["jpg", "jpeg", "png", "gif", "bmp"]);
+function normalizeAllowFromEntries(allowFrom) {
+  return allowFrom
+    .map((entry) => normalizePairingEntry(entry))
+    .filter(Boolean);
+}
+
+function buildConfigPath(account, field) {
+  return field ? `${account.configPath}.${field}` : account.configPath;
+}
+
+function resolveRuntimeTextChunker(text, limit) {
+  let runtime = null;
+  try {
+    runtime = getRuntime();
+  } catch {}
+  const chunker = runtime?.channel?.text?.chunkMarkdownText;
+  if (typeof chunker === "function") {
+    return chunker(text, limit);
+  }
+  return splitTextByByteLimit(text, limit);
+}
+
+function normalizeMediaPath(mediaUrl) {
+  let value = String(mediaUrl ?? "").trim();
+  if (!value) {
+    return "";
+  }
+  if (value.startsWith("sandbox:")) {
+    value = value.replace(/^sandbox:\/{0,2}/, "");
+    if (!value.startsWith("/")) {
+      value = `/${value}`;
+    }
+  }
+  return value;
+}
+
+async function loadMediaPayload(mediaUrl, { mediaLocalRoots } = {}) {
+  const normalized = normalizeMediaPath(mediaUrl);
+  if (normalized.startsWith("/")) {
+    // Prefer core's loadWebMedia with sandbox enforcement when available.
+    const runtime = getRuntime();
+    if (typeof runtime?.media?.loadWebMedia === "function" && Array.isArray(mediaLocalRoots) && mediaLocalRoots.length > 0) {
+      const loaded = await runtime.media.loadWebMedia(normalized, { localRoots: mediaLocalRoots });
+      return {
+        buffer: loaded.buffer,
+        filename: loaded.fileName || basename(normalized) || "file",
+        contentType: loaded.contentType || "",
+      };
+    }
+    const buffer = await readFile(normalized);
+    return {
+      buffer,
+      filename: basename(normalized) || "file",
+      contentType: "",
+    };
+  }
+
+  const response = await wecomFetch(normalized);
+  if (!response.ok) {
+    throw new Error(`failed to download media: ${response.status}`);
+  }
+  return {
+    buffer: Buffer.from(await response.arrayBuffer()),
+    filename: basename(new URL(normalized).pathname) || "file",
+    contentType: response.headers.get("content-type") || "",
+  };
+}
+
+async function loadResolvedMedia(mediaUrl, { mediaLocalRoots } = {}) {
+  const media = await loadMediaPayload(mediaUrl, { mediaLocalRoots });
+  return {
+    ...media,
+    mediaType: resolveAgentMediaType(media.filename, media.contentType),
+  };
+}
+
+function resolveAgentMediaType(filename, contentType) {
+  if (String(contentType).toLowerCase().startsWith("image/")) {
+    return "image";
+  }
+  const ext = String(filename ?? "")
+    .split(".")
+    .pop()
+    ?.toLowerCase();
+  return new Set(["jpg", "jpeg", "png", "gif", "bmp", "webp"]).has(ext) ? "image" : "file";
+}
 
 export function resolveAgentMediaTypeFromFilename(filename) {
-  const ext = filename.split(".").pop()?.toLowerCase() || "";
-  return AGENT_IMAGE_EXTS.has(ext) ? "image" : "file";
+  return resolveAgentMediaType(filename, "");
+}
+
+function resolveWsNoticeTarget(target, rawTo) {
+  if (target?.webhook || target?.toParty || target?.toTag) {
+    return null;
+  }
+  const fallback = String(rawTo ?? "").trim();
+  return target?.chatId || target?.toUser || fallback || null;
+}
+
+function buildUnsupportedMediaNotice({ text, mediaType, deliveredViaAgent }) {
+  let notice;
+  if (mediaType === "file") {
+    notice = deliveredViaAgent
+      ? "由于当前企业微信bot不支持给用户发送文件，文件通过自建应用发送。"
+      : "由于当前企业微信bot不支持给用户发送文件，且当前未配置自建应用发送渠道。";
+  } else if (mediaType === "image") {
+    notice = deliveredViaAgent
+      ? "由于当前企业微信bot不支持直接发送图片，图片通过自建应用发送。"
+      : "由于当前企业微信bot不支持直接发送图片，且当前未配置自建应用发送渠道。";
+  } else {
+    notice = deliveredViaAgent
+      ? "由于当前企业微信bot不支持直接发送媒体，媒体通过自建应用发送。"
+      : "由于当前企业微信bot不支持直接发送媒体，且当前未配置自建应用发送渠道。";
+  }
+
+  return [text, notice].filter(Boolean).join("\n\n");
+}
+
+async function sendUnsupportedMediaNoticeViaWs({ to, text, mediaType, accountId }) {
+  return sendWsMessage({
+    to,
+    content: buildUnsupportedMediaNotice({
+      text,
+      mediaType,
+      deliveredViaAgent: true,
+    }),
+    accountId,
+  });
+}
+
+function resolveOutboundAccountId(cfg, accountId) {
+  return accountId || resolveDefaultAccountId(cfg);
+}
+
+function applyNetworkConfig(cfg, accountId) {
+  const account = resolveAccount(cfg, accountId);
+  const network = account?.config?.network ?? {};
+  setConfigProxyUrl(network.egressProxyUrl ?? "");
+  setApiBaseUrl(network.apiBaseUrl ?? "");
+  return account;
+}
+
+async function sendViaWebhook({ cfg, accountId, webhookName, text, mediaUrl, preparedMedia }) {
+  const account = resolveAccount(cfg, accountId);
+  const raw = account?.config?.webhooks?.[webhookName];
+  const url = raw ? (String(raw).startsWith("http") ? String(raw) : `${getWebhookBotSendUrl()}?key=${raw}`) : null;
+  if (!url) {
+    throw new Error(`unknown webhook target: ${webhookName}`);
+  }
+
+  if (!mediaUrl) {
+    await webhookSendMarkdown({ url, content: text });
+    recordOutboundActivity({ accountId });
+    return { channel: CHANNEL_ID, messageId: `wecom-webhook-${Date.now()}` };
+  }
+
+  const { buffer, filename, mediaType } = preparedMedia ?? (await loadResolvedMedia(mediaUrl));
+
+  if (text) {
+    await webhookSendMarkdown({ url, content: text });
+  }
+
+  if (mediaType === "image") {
+    await webhookSendImage({
+      url,
+      base64: buffer.toString("base64"),
+      md5: crypto.createHash("md5").update(buffer).digest("hex"),
+    });
+  } else {
+    const mediaId = await webhookUploadFile({ url, buffer, filename });
+    await webhookSendFile({ url, mediaId });
+  }
+
+  recordOutboundActivity({ accountId });
+  return { channel: CHANNEL_ID, messageId: `wecom-webhook-${Date.now()}` };
+}
+
+async function sendViaAgent({ cfg, accountId, target, text, mediaUrl, preparedMedia }) {
+  const agent = resolveAccount(cfg, accountId)?.agentCredentials;
+  if (!agent) {
+    throw new Error("Agent API is not configured for this account");
+  }
+
+  if (text) {
+    for (const chunk of splitTextByByteLimit(text)) {
+      await agentSendText({ agent, ...target, text: chunk });
+    }
+  }
+
+  if (!mediaUrl) {
+    recordOutboundActivity({ accountId });
+    return { channel: CHANNEL_ID, messageId: `wecom-agent-${Date.now()}` };
+  }
+
+  const { buffer, filename, mediaType } = preparedMedia ?? (await loadResolvedMedia(mediaUrl));
+  const mediaId = await agentUploadMedia({
+    agent,
+    type: mediaType,
+    buffer,
+    filename,
+  });
+  await agentSendMedia({
+    agent,
+    ...target,
+    mediaId,
+    mediaType,
+  });
+
+  recordOutboundActivity({ accountId });
+  return { channel: CHANNEL_ID, messageId: `wecom-agent-${Date.now()}` };
 }
 
 export const wecomChannelPlugin = {
-  id: "wecom",
+  id: CHANNEL_ID,
   meta: {
-    id: "wecom",
+    id: CHANNEL_ID,
     label: "Enterprise WeChat",
     selectionLabel: "Enterprise WeChat (AI Bot)",
-    docsPath: "/channels/wecom",
-    blurb: "Enterprise WeChat AI Bot channel plugin.",
+    docsPath: `/channels/${CHANNEL_ID}`,
+    docsLabel: CHANNEL_ID,
+    blurb: "Enterprise WeChat AI Bot over WebSocket.",
     aliases: ["wecom", "wework"],
+    quickstartAllowFrom: true,
   },
+  pairing: {
+    idLabel: "wecomUserId",
+    normalizeAllowEntry: normalizePairingEntry,
+    notifyApproval: async ({ cfg, id, accountId }) => {
+      try {
+        await sendWsMessage({
+          to: id,
+          content: "配对已通过，可以开始发送消息。",
+          accountId: resolveOutboundAccountId(cfg, accountId),
+        });
+      } catch (error) {
+        logger.warn(`[wecom] failed to notify pairing approval: ${error.message}`);
+      }
+    },
+  },
+  onboarding: wecomOnboardingAdapter,
   capabilities: {
     chatTypes: ["direct", "group"],
     reactions: false,
     threads: false,
     media: true,
     nativeCommands: false,
-    blockStreaming: true, // WeCom AI Bot requires stream-style responses.
+    blockStreaming: true,
   },
-  reload: { configPrefixes: ["channels.wecom"] },
+  reload: { configPrefixes: [`channels.${CHANNEL_ID}`] },
   configSchema: {
     schema: {
-      $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
       additionalProperties: true,
       properties: {
-        enabled: {
-          type: "boolean",
-          description: "Enable WeCom channel",
-          default: true,
-        },
-        token: {
-          type: "string",
-          description: "WeCom bot token from admin console",
-        },
-        encodingAesKey: {
-          type: "string",
-          description: "WeCom message encryption key (43 characters)",
-          minLength: 43,
-          maxLength: 43,
-        },
-        commands: {
-          type: "object",
-          description: "Command whitelist configuration",
-          additionalProperties: false,
-          properties: {
-            enabled: {
-              type: "boolean",
-              description: "Enable command whitelist filtering",
-              default: true,
-            },
-            allowlist: {
-              type: "array",
-              description: "Allowed commands (e.g., /new, /status, /help)",
-              items: {
-                type: "string",
-              },
-              default: ["/new", "/status", "/help", "/compact"],
-            },
-          },
-        },
-        dynamicAgents: {
-          type: "object",
-          description: "Dynamic agent routing configuration",
-          additionalProperties: false,
-          properties: {
-            enabled: {
-              type: "boolean",
-              description: "Enable per-user/per-group agent isolation",
-              default: true,
-            },
-            adminBypass: {
-              type: "boolean",
-              description: "When true, adminUsers bypass dynamic agent routing and use the default route",
-              default: false,
-            },
-          },
-        },
-        dm: {
-          type: "object",
-          description: "Direct message (private chat) configuration",
-          additionalProperties: false,
-          properties: {
-            createAgentOnFirstMessage: {
-              type: "boolean",
-              description: "Create separate agent for each user",
-              default: true,
-            },
-          },
-        },
-        groupChat: {
-          type: "object",
-          description: "Group chat configuration",
-          additionalProperties: false,
-          properties: {
-            enabled: {
-              type: "boolean",
-              description: "Enable group chat support",
-              default: true,
-            },
-            requireMention: {
-              type: "boolean",
-              description: "Only respond when @mentioned in groups",
-              default: true,
-            },
-          },
-        },
-        adminUsers: {
-          type: "array",
-          description: "Admin users who bypass command allowlist (routing unchanged)",
-          items: { type: "string" },
-          default: [],
-        },
-        workspaceTemplate: {
-          type: "string",
-          description: "Directory with custom bootstrap templates (AGENTS.md, BOOTSTRAP.md, etc.)",
-        },
-        agent: {
-          type: "object",
-          description: "Agent mode (self-built application) configuration for outbound messaging and inbound callbacks",
-          additionalProperties: false,
-          properties: {
-            corpId: { type: "string", description: "Enterprise Corp ID" },
-            corpSecret: { type: "string", description: "Application Secret" },
-            agentId: { type: "number", description: "Application Agent ID" },
-            token: { type: "string", description: "Callback Token for Agent inbound" },
-            encodingAesKey: {
-              type: "string",
-              description: "Callback Encoding AES Key for Agent inbound (43 characters)",
-              minLength: 43,
-              maxLength: 43,
-            },
-          },
-        },
-        network: {
-          type: "object",
-          description: "Network configuration (proxy, timeouts)",
-          additionalProperties: false,
-          properties: {
-            egressProxyUrl: {
-              type: "string",
-              description: "HTTP(S) proxy URL for outbound WeCom API requests (e.g. http://proxy:8080). Env var WECOM_EGRESS_PROXY_URL takes precedence.",
-            },
-            apiBaseUrl: {
-              type: "string",
-              description: "Custom WeCom API base URL (default: https://qyapi.weixin.qq.com). Use when routing through a reverse-proxy or API gateway. Env var WECOM_API_BASE_URL takes precedence.",
-            },
-          },
-        },
-        webhooks: {
-          type: "object",
-          description: "Webhook bot URLs for group notifications (key: name, value: webhook URL or key)",
-          additionalProperties: { type: "string" },
-        },
-        instances: {
-          type: "array",
-          description: "Additional bot / agent accounts. Each entry inherits top-level fields it does not override.",
-          items: {
-            type: "object",
-            additionalProperties: false,
-            required: ["name"],
-            properties: {
-              name: {
-                type: "string",
-                description: "Unique account slug (lowercase, a-z0-9_- only). Used as accountId and in webhook paths.",
-                pattern: "^[a-z0-9_-]+$",
-              },
-              enabled: { type: "boolean", default: true },
-              token: { type: "string", description: "Bot Token (overrides top-level)" },
-              encodingAesKey: {
-                type: "string",
-                description: "Encoding AES Key (overrides top-level)",
-                minLength: 43,
-                maxLength: 43,
-              },
-              agent: {
-                type: "object",
-                description: "Agent configuration for this instance (full replacement, not merged with top-level)",
-                properties: {
-                  corpId: { type: "string" },
-                  corpSecret: { type: "string" },
-                  agentId: { type: "number" },
-                  token: { type: "string" },
-                  encodingAesKey: { type: "string", minLength: 43, maxLength: 43 },
-                },
-              },
-              webhooks: {
-                type: "object",
-                description: "Webhook bot URLs for this instance",
-                additionalProperties: { type: "string" },
-              },
-              webhookPath: {
-                type: "string",
-                description: "Custom webhook path (default: /webhooks/wecom/{name})",
-              },
-            },
-          },
-        },
+        enabled: { type: "boolean" },
+        defaultAccount: { type: "string" },
+        botId: { type: "string" },
+        secret: { type: "string" },
+        websocketUrl: { type: "string" },
+        sendThinkingMessage: { type: "boolean" },
+        welcomeMessage: { type: "string" },
+        dmPolicy: { enum: ["pairing", "allowlist", "open", "disabled"] },
+        allowFrom: { type: "array", items: { type: "string" } },
+        groupPolicy: { enum: ["open", "allowlist", "disabled"] },
+        groupAllowFrom: { type: "array", items: { type: "string" } },
       },
     },
     uiHints: {
-      token: {
-        sensitive: true,
-        label: "Bot Token",
-      },
-      encodingAesKey: {
-        sensitive: true,
-        label: "Encoding AES Key",
-        help: "43-character encryption key from WeCom admin console",
-      },
-      "agent.corpSecret": {
-        sensitive: true,
-        label: "Application Secret",
-      },
-      "agent.token": {
-        sensitive: true,
-        label: "Agent Callback Token",
-      },
-      "agent.encodingAesKey": {
-        sensitive: true,
-        label: "Agent Callback Encoding AES Key",
-        help: "43-character encryption key for Agent inbound callbacks",
-      },
+      botId: { label: "Bot ID" },
+      secret: { label: "Secret", sensitive: true },
+      websocketUrl: { label: "WebSocket URL", placeholder: DEFAULT_WS_URL },
+      welcomeMessage: { label: "Welcome Message" },
+      "agent.corpSecret": { sensitive: true, label: "Application Secret" },
     },
   },
   config: {
-    listAccountIds: (cfg) => listAccountIds(cfg),
-    resolveAccount: (cfg, accountId) => resolveAccount(cfg, accountId),
-    defaultAccountId: (cfg) => {
-      const ids = listAccountIds(cfg);
-      return ids.length > 0 ? ids[0] : null;
-    },
-    setAccountEnabled: ({ cfg, accountId, enabled }) => {
-      if (!cfg.channels) cfg.channels = {};
-      if (!cfg.channels.wecom) cfg.channels.wecom = {};
-      const wecom = cfg.channels.wecom;
-      if (!accountId || accountId === DEFAULT_ACCOUNT_ID) {
-        // Legacy single-account: toggle top-level enabled.
-        wecom.enabled = enabled;
-      } else if (wecom[accountId] && typeof wecom[accountId] === "object") {
-        // Dictionary mode: toggle per-account enabled.
-        wecom[accountId].enabled = enabled;
+    listAccountIds,
+    resolveAccount,
+    defaultAccountId: (cfg) => resolveDefaultAccountId(cfg),
+    setAccountEnabled: ({ cfg, accountId, enabled }) => updateAccountConfig(cfg, accountId, { enabled }),
+    deleteAccount: ({ cfg, accountId }) => deleteAccountConfig(cfg, accountId),
+    isConfigured: (account) => Boolean(account.botId && account.secret),
+    describeAccount,
+    resolveAllowFrom: ({ cfg, accountId }) => resolveAllowFromForAccount(cfg, accountId),
+    formatAllowFrom: ({ allowFrom }) => normalizeAllowFromEntries(allowFrom.map((entry) => String(entry))),
+  },
+  security: {
+    resolveDmPolicy: ({ account }) => ({
+      policy: account.config.dmPolicy ?? "pairing",
+      allowFrom: account.config.allowFrom ?? [],
+      policyPath: buildConfigPath(account, "dmPolicy"),
+      allowFromPath: buildConfigPath(account, "allowFrom"),
+      approveHint: formatPairingApproveHint(CHANNEL_ID),
+      normalizeEntry: normalizePairingEntry,
+    }),
+    collectWarnings: ({ account }) => {
+      const warnings = [];
+      const allowFrom = Array.isArray(account.config.allowFrom) ? account.config.allowFrom.map((entry) => String(entry)) : [];
+
+      if ((account.config.dmPolicy ?? "pairing") === "open" && !allowFrom.includes("*")) {
+        warnings.push(
+          `- ${account.accountId}: dmPolicy="open" 但 allowFrom 未包含 "*"; 建议同时显式配置 ${buildConfigPath(account, "allowFrom")}=["*"]。`,
+        );
       }
-      return cfg;
-    },
-    deleteAccount: ({ cfg, accountId }) => {
-      if (!accountId || accountId === DEFAULT_ACCOUNT_ID) {
-        if (cfg.channels?.wecom) delete cfg.channels.wecom;
-      } else if (cfg.channels?.wecom) {
-        delete cfg.channels.wecom[accountId];
+
+      if ((account.config.groupPolicy ?? "open") === "open") {
+        warnings.push(
+          `- ${account.accountId}: groupPolicy="open" 会允许所有群聊触发；如需收敛，请配置 ${buildConfigPath(account, "groupPolicy")}="allowlist"。`,
+        );
       }
-      return cfg;
+
+      return warnings;
+    },
+  },
+  messaging: {
+    normalizeTarget: (target) => {
+      const trimmed = String(target ?? "").trim();
+      return trimmed || undefined;
+    },
+    targetResolver: {
+      looksLikeId: (value) => Boolean(String(value ?? "").trim()),
+      hint: "<userId|groupId>",
     },
   },
   directory: {
@@ -282,559 +372,262 @@ export const wecomChannelPlugin = {
     listPeers: async () => [],
     listGroups: async () => [],
   },
-  // Outbound adapter: all replies are streamed for WeCom AI Bot compatibility.
   outbound: {
     deliveryMode: "direct",
-    sendText: async ({ cfg: _cfg, to, text, accountId: _accountId }) => {
-      // `to` format: "wecom:userid" or "userid".
-      const userId = to.replace(/^wecom:/, "");
+    chunker: (text, limit) => resolveRuntimeTextChunker(text, limit),
+    textChunkLimit: TEXT_CHUNK_LIMIT,
+    sendText: async ({ cfg, to, text, accountId }) => {
+      const resolvedAccountId = resolveOutboundAccountId(cfg, accountId);
+      setOpenclawConfig(cfg);
+      applyNetworkConfig(cfg, resolvedAccountId);
+      const target = resolveWecomTarget(to) ?? {};
 
-      // Prefer async-context stream only when it is still writable.
-      // If the context stream already finished (common with concurrent messages),
-      // fall back to the latest recoverable active stream for this user/group.
-      const ctx = streamContext.getStore();
-      const ctxStreamId = ctx?.streamId ?? null;
-      const ctxStream = ctxStreamId ? streamManager.getStream(ctxStreamId) : null;
-      const canUseCtxStream = !!(ctxStreamId && ctxStream && !ctxStream.finished);
-      const streamId = canUseCtxStream ? ctxStreamId : resolveRecoverableStream(userId);
-      const streamObj = streamId ? streamManager.getStream(streamId) : null;
-      const hasStream = streamId ? streamManager.hasStream(streamId) : false;
-      const finished = streamObj?.finished ?? true;
-
-      // Layer 1: Active stream (normal path)
-      if (streamId && hasStream && !finished) {
-        logger.debug("Appending outbound text to stream", {
-          userId,
-          streamId,
-          source: ctx ? "asyncContext" : "activeStreams",
-          text: text.substring(0, 30),
+      if (target.webhook) {
+        return sendViaWebhook({
+          cfg,
+          accountId: resolvedAccountId,
+          webhookName: target.webhook,
+          text,
         });
-        // Replace placeholder or append content.
-        streamManager.replaceIfPlaceholder(streamId, text, THINKING_PLACEHOLDER);
-
-        return {
-          channel: "wecom",
-          messageId: `msg_stream_${Date.now()}`,
-        };
       }
 
-      // Log stream miss details for debugging concurrent-message issues.
-      logger.warn("WeCom sendText: Layer 1 stream miss", {
-        userId,
-        streamId: streamId ?? null,
-        hasStream,
-        finished,
-        hasAsyncContext: !!ctx,
-        ctxStreamId,
-        canUseCtxStream,
-        ctxStreamKey: ctx?.streamKey ?? null,
-        textPreview: text.substring(0, 50),
-      });
-
-      // Layer 2: Fallback via response_url
-      // response_url is valid for 1 hour and can be used only once.
-      // responseUrls is keyed by streamKey (fromUser for DM, chatId for group).
-      const saved = responseUrls.get(ctx?.streamKey ?? userId);
-      if (saved && !saved.used && Date.now() < saved.expiresAt) {
-        try {
-          const response = await wecomFetch(saved.url, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ msgtype: "markdown", markdown: { content: text } }),
+      try {
+        if (!target.toParty && !target.toTag) {
+          const wsTarget = target.chatId || target.toUser || to;
+          return await sendWsMessage({
+            to: wsTarget,
+            content: text,
+            accountId: resolvedAccountId,
           });
-          const responseBody = await response.text().catch(() => "");
-          const result = parseResponseUrlResult(response, responseBody);
-          if (!result.accepted) {
-            logger.error("WeCom: response_url fallback rejected", {
-              userId,
-              status: response.status,
-              statusText: response.statusText,
-              errcode: result.errcode,
-              errmsg: result.errmsg,
-              bodyPreview: result.bodyPreview,
-            });
-          } else {
-            saved.used = true;
-            logger.info("WeCom: sent via response_url fallback", {
-              userId,
-              status: response.status,
-              errcode: result.errcode,
-            });
-            return {
-              channel: "wecom",
-              messageId: `msg_response_url_${Date.now()}`,
-            };
-          }
-        } catch (err) {
-          logger.error("WeCom: response_url fallback failed", { userId, error: err.message });
         }
+      } catch (error) {
+        logger.warn(`[wecom] WS sendText failed, falling back to Agent API: ${error.message}`);
       }
 
-      // Layer 3a: Webhook Bot (group notifications via webhook:name target)
-      const target = resolveWecomTarget(to);
-      if (target?.webhook) {
-        const webhookUrl = resolveWebhookUrl(target.webhook);
-        if (webhookUrl) {
-          try {
-            await webhookSendText({ url: webhookUrl, content: text });
-            logger.info("WeCom: sent via Webhook Bot (sendText)", {
-              webhookName: target.webhook,
-              contentPreview: text.substring(0, 50),
-            });
-            return {
-              channel: "wecom",
-              messageId: `msg_webhook_${Date.now()}`,
-            };
-          } catch (err) {
-            logger.error("WeCom: Webhook Bot sendText failed", {
-              webhookName: target.webhook,
-              error: err.message,
-            });
-          }
-        } else {
-          logger.warn("WeCom: webhook name not found in config", { webhookName: target.webhook });
-        }
-      }
-
-      // Layer 3b: Agent API fallback (stream closed + response_url unavailable)
-      const agentConfig = resolveAgentConfig();
-      if (agentConfig) {
-        try {
-          const agentTarget = (target && !target.webhook) ? target : { toUser: userId };
-          const chunks = splitTextByByteLimit(text);
-          for (const chunk of chunks) {
-            await agentSendText({ agent: agentConfig, ...agentTarget, text: chunk });
-          }
-          logger.info("WeCom: sent via Agent API fallback (sendText)", {
-            userId,
-            to,
-            chunks: chunks.length,
-            contentPreview: text.substring(0, 50),
-          });
-          return {
-            channel: "wecom",
-            messageId: `msg_agent_${Date.now()}`,
-          };
-        } catch (err) {
-          logger.error("WeCom: Agent API fallback failed (sendText)", { userId, error: err.message });
-        }
-      }
-
-      logger.warn("WeCom outbound: no delivery channel available (all layers exhausted)", {
-        userId,
+      return sendViaAgent({
+        cfg,
+        accountId: resolvedAccountId,
+        target: target.toParty || target.toTag ? target : target.chatId ? { chatId: target.chatId } : { toUser: target.toUser || String(to).replace(/^wecom:/i, "") },
+        text,
       });
-
-      return {
-        channel: "wecom",
-        messageId: `fake_${Date.now()}`,
-      };
     },
-    sendMedia: async ({ cfg: _cfg, to, text, mediaUrl, accountId: _accountId }) => {
-      const userId = to.replace(/^wecom:/, "");
+    sendMedia: async ({ cfg, to, text, mediaUrl, mediaLocalRoots, accountId }) => {
+      const resolvedAccountId = resolveOutboundAccountId(cfg, accountId);
+      setOpenclawConfig(cfg);
+      const account = applyNetworkConfig(cfg, resolvedAccountId);
+      const target = resolveWecomTarget(to) ?? {};
+      const wsNoticeTarget = resolveWsNoticeTarget(target, to);
 
-      // Prefer async-context stream only when it is still writable.
-      const ctx = streamContext.getStore();
-      const ctxStreamId = ctx?.streamId ?? null;
-      const ctxStream = ctxStreamId ? streamManager.getStream(ctxStreamId) : null;
-      const canUseCtxStream = !!(ctxStreamId && ctxStream && !ctxStream.finished);
-      const streamId = canUseCtxStream ? ctxStreamId : resolveRecoverableStream(userId);
-
-      if (streamId && streamManager.hasStream(streamId) && !streamManager.getStream(streamId)?.finished) {
-        // Check if mediaUrl is a local path (sandbox: prefix or absolute path)
-        const isLocalPath = mediaUrl.startsWith("sandbox:") || mediaUrl.startsWith("/");
-
-        if (isLocalPath) {
-          // Convert sandbox: URLs to absolute paths.
-          // sandbox:///tmp/a -> /tmp/a, sandbox://tmp/a -> /tmp/a, sandbox:/tmp/a -> /tmp/a
-          let absolutePath = mediaUrl;
-          if (absolutePath.startsWith("sandbox:")) {
-            absolutePath = absolutePath.replace(/^sandbox:\/{0,2}/, "");
-            // Ensure the result is an absolute path.
-            if (!absolutePath.startsWith("/")) {
-              absolutePath = "/" + absolutePath;
-            }
-          }
-
-          const fileFilename = basename(absolutePath);
-          const fileExt = fileFilename.split(".").pop()?.toLowerCase() || "";
-          const streamImageExts = new Set(["jpg", "jpeg", "png", "gif", "bmp"]);
-
-          if (!streamImageExts.has(fileExt)) {
-            // Non-image file: WeCom Bot stream API does not support files.
-            // Send via Agent DM and post a hint in the group stream.
-            logger.debug("Non-image file in active stream, routing via Agent DM", {
-              userId,
-              streamId,
-              absolutePath,
-              fileExt,
-            });
-            const agentCfgForFile = resolveAgentConfig();
-            if (agentCfgForFile) {
-              try {
-                const fileBuf = await readFile(absolutePath);
-                const fileMediaId = await agentUploadMedia({
-                  agent: agentCfgForFile,
-                  type: "file",
-                  buffer: fileBuf,
-                  filename: fileFilename,
-                });
-                await agentSendMedia({
-                  agent: agentCfgForFile,
-                  toUser: userId,
-                  mediaId: fileMediaId,
-                  mediaType: "file",
-                });
-                const fileHint = text
-                  ? `${text}\n\n📎 文件已通过私信发送给您：${fileFilename}`
-                  : `📎 文件已通过私信发送给您：${fileFilename}`;
-                streamManager.replaceIfPlaceholder(streamId, fileHint, THINKING_PLACEHOLDER);
-                logger.info("WeCom: sent non-image file via Agent DM (active stream)", {
-                  userId,
-                  filename: fileFilename,
-                });
-              } catch (fileErr) {
-                logger.error("WeCom: Agent DM file send failed (active stream)", {
-                  userId,
-                  filename: fileFilename,
-                  error: fileErr.message,
-                });
-                const errHint = text
-                  ? `${text}\n\n⚠️ 文件发送失败（${fileFilename}）：${fileErr.message}`
-                  : `⚠️ 文件发送失败（${fileFilename}）：${fileErr.message}`;
-                streamManager.replaceIfPlaceholder(streamId, errHint, THINKING_PLACEHOLDER);
-              }
-            } else {
-              // No Agent API configured — post a notice in stream.
-              const noAgentHint = text
-                ? `${text}\n\n⚠️ 无法发送文件 ${fileFilename}（未配置 Agent API）`
-                : `⚠️ 无法发送文件 ${fileFilename}（未配置 Agent API）`;
-              streamManager.replaceIfPlaceholder(streamId, noAgentHint, THINKING_PLACEHOLDER);
-            }
-            return {
-              channel: "wecom",
-              messageId: `msg_stream_file_${Date.now()}`,
-            };
-          }
-
-          logger.debug("Queueing local image for stream", {
-            userId,
-            streamId,
-            mediaUrl,
-            absolutePath,
-          });
-
-          // Queue the image for processing when stream finishes
-          const queued = streamManager.queueImage(streamId, absolutePath);
-
-          if (queued) {
-            // Append text content to stream (without markdown image)
-            if (text) {
-              streamManager.replaceIfPlaceholder(streamId, text, THINKING_PLACEHOLDER);
-            }
-
-            // Append placeholder indicating image will follow
-            const imagePlaceholder = "\n\n[图片]";
-            streamManager.appendStream(streamId, imagePlaceholder);
-
-            return {
-              channel: "wecom",
-              messageId: `msg_stream_img_${Date.now()}`,
-            };
-          } else {
-            logger.warn("Failed to queue image, falling back to markdown", {
-              userId,
-              streamId,
-              mediaUrl,
-            });
-            // Fallback to old behavior
-          }
-        }
-
-        // OLD BEHAVIOR: For external URLs or if queueing failed, use markdown
-        const content = text ? `${text}\n\n![image](${mediaUrl})` : `![image](${mediaUrl})`;
-        logger.debug("Appending outbound media to stream (markdown)", {
-          userId,
-          streamId,
+      if (target.webhook) {
+        const preparedMedia = mediaUrl ? await loadResolvedMedia(mediaUrl, { mediaLocalRoots }) : undefined;
+        return sendViaWebhook({
+          cfg,
+          accountId: resolvedAccountId,
+          webhookName: target.webhook,
+          text,
           mediaUrl,
+          preparedMedia,
+        });
+      }
+
+      const agentTarget =
+        target.toParty || target.toTag
+          ? target
+          : target.chatId
+            ? { chatId: target.chatId }
+            : { toUser: target.toUser || String(to).replace(/^wecom:/i, "") };
+      const preparedMedia = await loadResolvedMedia(mediaUrl, { mediaLocalRoots });
+
+      if (target.toParty || target.toTag) {
+        if (!account?.agentCredentials) {
+          throw new Error("Agent API is required for party/tag media delivery");
+        }
+        return sendViaAgent({
+          cfg,
+          accountId: resolvedAccountId,
+          target: agentTarget,
+          text,
+          mediaUrl,
+          preparedMedia,
+        });
+      }
+
+      if (account?.agentCredentials) {
+        const agentResult = await sendViaAgent({
+          cfg,
+          accountId: resolvedAccountId,
+          target: agentTarget,
+          text: wsNoticeTarget ? undefined : text,
+          mediaUrl,
+          preparedMedia,
         });
 
-        // Replace placeholder or append media markdown to the current stream content.
-        streamManager.replaceIfPlaceholder(streamId, content, THINKING_PLACEHOLDER);
-
-        return {
-          channel: "wecom",
-          messageId: `msg_stream_${Date.now()}`,
-        };
-      }
-
-      logger.warn("WeCom outbound sendMedia: no active stream, trying fallbacks", { userId });
-
-      // Layer 2a: Webhook Bot fallback for media (group notifications)
-      const target = resolveWecomTarget(to);
-      if (target?.webhook) {
-        const webhookUrl = resolveWebhookUrl(target.webhook);
-        if (webhookUrl) {
+        if (wsNoticeTarget) {
           try {
-            // Resolve file to buffer
-            let buffer;
-            let filename;
-            let absolutePath = mediaUrl;
-            if (absolutePath.startsWith("sandbox:")) {
-              absolutePath = absolutePath.replace(/^sandbox:\/{0,2}/, "");
-              if (!absolutePath.startsWith("/")) absolutePath = "/" + absolutePath;
-            }
-
-            if (absolutePath.startsWith("/")) {
-              buffer = await readFile(absolutePath);
-              filename = basename(absolutePath);
-            } else {
-              const res = await wecomFetch(mediaUrl);
-              buffer = Buffer.from(await res.arrayBuffer());
-              filename = basename(new URL(mediaUrl).pathname) || "image.png";
-            }
-
-            // Try image (base64) for common image types, otherwise upload as file
-            const ext = filename.split(".").pop()?.toLowerCase() || "";
-            const imageExts = new Set(["jpg", "jpeg", "png", "gif", "bmp"]);
-
-            if (imageExts.has(ext)) {
-              const base64 = buffer.toString("base64");
-              const md5 = crypto.createHash("md5").update(buffer).digest("hex");
-              await webhookSendImage({ url: webhookUrl, base64, md5 });
-            } else {
-              const mediaId = await webhookUploadFile({ url: webhookUrl, buffer, filename });
-              await webhookSendFile({ url: webhookUrl, mediaId });
-            }
-
-            // Send accompanying text if present
+            await sendUnsupportedMediaNoticeViaWs({
+              to: wsNoticeTarget,
+              text,
+              mediaType: preparedMedia.mediaType,
+              accountId: resolvedAccountId,
+            });
+          } catch (error) {
+            logger.warn(`[wecom] WS media notice failed, falling back to Agent text delivery: ${error.message}`);
             if (text) {
-              await webhookSendText({ url: webhookUrl, content: text });
-            }
-
-            logger.info("WeCom: sent media via Webhook Bot (sendMedia)", {
-              webhookName: target.webhook,
-              mediaUrl: mediaUrl.substring(0, 80),
-            });
-            return {
-              channel: "wecom",
-              messageId: `msg_webhook_media_${Date.now()}`,
-            };
-          } catch (err) {
-            logger.error("WeCom: Webhook Bot sendMedia failed", {
-              webhookName: target.webhook,
-              error: err.message,
-            });
-          }
-        } else {
-          logger.warn("WeCom: webhook name not found in config (sendMedia)", { webhookName: target.webhook });
-        }
-      }
-
-      // Layer 2b: Agent API fallback for media
-      const agentConfig = resolveAgentConfig();
-      if (agentConfig) {
-        try {
-          const agentTarget = (target && !target.webhook) ? target : resolveWecomTarget(to) || { toUser: userId };
-          let deliveredFilename = "file";
-
-          // Determine if mediaUrl is a local file path.
-          let absolutePath = mediaUrl;
-          if (absolutePath.startsWith("sandbox:")) {
-            absolutePath = absolutePath.replace(/^sandbox:\/{0,2}/, "");
-            if (!absolutePath.startsWith("/")) absolutePath = "/" + absolutePath;
-          }
-
-          if (absolutePath.startsWith("/")) {
-            // Upload local file then send via Agent API.
-            const buffer = await readFile(absolutePath);
-            const filename = basename(absolutePath);
-            deliveredFilename = filename;
-            const uploadType = resolveAgentMediaTypeFromFilename(filename);
-            const mediaId = await agentUploadMedia({
-              agent: agentConfig,
-              type: uploadType,
-              buffer,
-              filename,
-            });
-            await agentSendMedia({
-              agent: agentConfig,
-              ...agentTarget,
-              mediaId,
-              mediaType: uploadType,
-            });
-          } else {
-            // For external URLs, download first then upload.
-            const res = await wecomFetch(mediaUrl);
-            if (!res.ok) {
-              throw new Error(`download media failed: ${res.status}`);
-            }
-            const buffer = Buffer.from(await res.arrayBuffer());
-            const filename = basename(new URL(mediaUrl).pathname) || "file";
-            deliveredFilename = filename;
-            let uploadType = resolveAgentMediaTypeFromFilename(filename);
-            const contentType = res.headers.get("content-type") || "";
-            if (uploadType === "file" && contentType.toLowerCase().startsWith("image/")) {
-              uploadType = "image";
-            }
-            const mediaId = await agentUploadMedia({
-              agent: agentConfig,
-              type: uploadType,
-              buffer,
-              filename,
-            });
-            await agentSendMedia({
-              agent: agentConfig,
-              ...agentTarget,
-              mediaId,
-              mediaType: uploadType,
-            });
-          }
-
-          // Also send accompanying text if present.
-          if (text) {
-            await agentSendText({ agent: agentConfig, ...agentTarget, text });
-          }
-
-          // Best-effort stream recovery: when async context is missing and the
-          // active stream mapping was already cleaned, still clear "thinking..."
-          // in the most recent stream for this user.
-          const recoverStreamId = resolveRecoverableStream(userId);
-          if (recoverStreamId && streamManager.hasStream(recoverStreamId)) {
-            const recoverStream = streamManager.getStream(recoverStreamId);
-            if (recoverStream && !recoverStream.finished) {
-              const deliveryHint = text
-                ? `${text}\n\n📎 文件已通过私信发送给您：${deliveredFilename}`
-                : `📎 文件已通过私信发送给您：${deliveredFilename}`;
-              streamManager.replaceIfPlaceholder(
-                recoverStreamId,
-                deliveryHint,
-                THINKING_PLACEHOLDER,
-              );
-              await streamManager.finishStream(recoverStreamId);
-              unregisterActiveStream(userId, recoverStreamId);
-              logger.info("WeCom: recovered and finished stream after media fallback", {
-                userId,
-                streamId: recoverStreamId,
+              await sendViaAgent({
+                cfg,
+                accountId: resolvedAccountId,
+                target: agentTarget,
+                text,
               });
             }
           }
-
-          logger.info("WeCom: sent media via Agent API fallback (sendMedia)", {
-            userId,
-            to,
-            mediaUrl: mediaUrl.substring(0, 80),
-          });
-          return {
-            channel: "wecom",
-            messageId: `msg_agent_media_${Date.now()}`,
-          };
-        } catch (err) {
-          logger.error("WeCom: Agent API media fallback failed", { userId, error: err.message });
         }
+
+        return agentResult;
       }
 
+      if (wsNoticeTarget) {
+        logger.warn("[wecom] Agent API is not configured for unsupported WS media; sending notice only");
+        return sendWsMessage({
+          to: wsNoticeTarget,
+          content: buildUnsupportedMediaNotice({
+            text,
+            mediaType: preparedMedia.mediaType,
+            deliveredViaAgent: false,
+          }),
+          accountId: resolvedAccountId,
+        });
+      }
+
+      throw new Error("Agent API is not configured for unsupported WeCom media delivery");
+    },
+  },
+  status: {
+    defaultRuntime: {
+      accountId: DEFAULT_ACCOUNT_ID,
+      running: false,
+      lastStartAt: null,
+      lastStopAt: null,
+      lastError: null,
+      lastInboundAt: null,
+      lastOutboundAt: null,
+    },
+    collectStatusIssues: (accounts, ctx = {}) =>
+      accounts.flatMap((entry) => {
+        if (entry.enabled === false) {
+          return [];
+        }
+
+        const issues = [];
+        if (!entry.configured) {
+          issues.push({
+            channel: CHANNEL_ID,
+            accountId: entry.accountId,
+            kind: "config",
+            message: "企业微信 botId 或 secret 未配置",
+            fix: "Run: openclaw channels add wecom --bot-id <id> --secret <secret>",
+          });
+        }
+
+        for (const conflict of detectAccountConflicts(ctx.cfg ?? {})) {
+          if (conflict.accounts.includes(entry.accountId)) {
+            issues.push({
+              channel: CHANNEL_ID,
+              accountId: entry.accountId,
+              kind: "config",
+              message: conflict.message,
+            });
+          }
+        }
+
+        const telemetry = entry.wecomStatus ?? {};
+        const displacedAt = telemetry.connection?.lastDisplacedAt;
+        if (telemetry.connection?.displaced) {
+          issues.push({
+            channel: CHANNEL_ID,
+            accountId: entry.accountId,
+            kind: "runtime",
+            message: `企业微信长连接已被其他实例接管${displacedAt ? `（${new Date(displacedAt).toISOString()}）` : ""}。`,
+            fix: "检查是否有多个实例同时使用相同 botId；保留一个活跃连接即可。",
+          });
+        }
+
+        const quotas = telemetry.quotas ?? {};
+        if ((quotas.exhaustedReplyChats ?? 0) > 0 || (quotas.exhaustedActiveChats ?? 0) > 0) {
+          issues.push({
+            channel: CHANNEL_ID,
+            accountId: entry.accountId,
+            kind: "runtime",
+            message: `企业微信配额已触顶：24h 回复窗口触顶 ${quotas.exhaustedReplyChats ?? 0} 个会话，主动发送日配额触顶 ${quotas.exhaustedActiveChats ?? 0} 个会话。`,
+          });
+        } else if ((quotas.nearLimitReplyChats ?? 0) > 0 || (quotas.nearLimitActiveChats ?? 0) > 0) {
+          issues.push({
+            channel: CHANNEL_ID,
+            accountId: entry.accountId,
+            kind: "runtime",
+            message: `企业微信配额接近上限：24h 回复窗口接近上限 ${quotas.nearLimitReplyChats ?? 0} 个会话，主动发送日配额接近上限 ${quotas.nearLimitActiveChats ?? 0} 个会话。`,
+          });
+        }
+
+        return issues;
+      }),
+    buildChannelSummary: ({ snapshot }) => buildBaseChannelStatusSummary(snapshot),
+    probeAccount: async () => ({ ok: true, status: 200 }),
+    buildAccountSnapshot: ({ account, runtime, probe }) => {
+      const telemetry = getAccountTelemetry(account.accountId);
       return {
-        channel: "wecom",
-        messageId: `fake_${Date.now()}`,
+        ...buildBaseAccountStatusSnapshot({
+          account,
+          runtime: {
+            ...runtime,
+            lastInboundAt: telemetry.lastInboundAt ?? runtime?.lastInboundAt ?? null,
+            lastOutboundAt: telemetry.lastOutboundAt ?? runtime?.lastOutboundAt ?? null,
+          },
+          probe,
+        }),
+        wecomStatus: telemetry,
       };
     },
   },
   gateway: {
     startAccount: async (ctx) => {
-      const account = ctx.account;
-      logger.info("WeCom gateway starting", {
-        accountId: account.accountId,
-        webhookPath: account.webhookPath,
+      setOpenclawConfig(ctx.cfg);
+      logAccountConflicts(ctx.cfg);
+
+      const network = ctx.account.config.network ?? {};
+      setConfigProxyUrl(network.egressProxyUrl ?? "");
+      setApiBaseUrl(network.apiBaseUrl ?? "");
+
+      return startWsMonitor({
+        account: ctx.account,
+        config: ctx.cfg,
+        runtime: ctx.runtime,
+        abortSignal: ctx.abortSignal,
       });
-
-      // Wire proxy URL from config (env var takes precedence inside http.js).
-      const wecomCfg = ctx.cfg?.channels?.wecom ?? {};
-      setConfigProxyUrl(wecomCfg.network?.egressProxyUrl ?? "");
-      // Wire API base URL override (env var WECOM_API_BASE_URL takes precedence).
-      setApiBaseUrl(wecomCfg.network?.apiBaseUrl ?? "");
-
-      // Conflict detection: warn about duplicate tokens / agent IDs.
-      const conflicts = detectAccountConflicts(ctx.cfg);
-      for (const conflict of conflicts) {
-        logger.error(`WeCom config conflict: ${conflict.message}`, {
-          type: conflict.type,
-          accounts: conflict.accounts,
-        });
+    },
+    logoutAccount: async ({ cfg, accountId }) => {
+      const current = resolveAccount(cfg, accountId);
+      const cleared = Boolean(current.botId || current.secret);
+      const nextCfg = cleared
+        ? updateAccountConfig(cfg, accountId, {
+            botId: undefined,
+            secret: undefined,
+          })
+        : cfg;
+      const runtime = getRuntime();
+      if (cleared && runtime?.config?.writeConfigFile) {
+        await runtime.config.writeConfigFile(nextCfg);
       }
-
-      let unregister;
-      const botPath = account.webhookPath;
-      if (botPath) {
-        unregister = registerWebhookTarget({
-          path: botPath,
-          account,
-          config: ctx.cfg,
-        });
-        logger.info("WeCom Bot webhook path active", { path: botPath });
-      } else {
-        logger.debug("No Bot webhook path for this account, skipping", { accountId: account.accountId });
-      }
-
-      // Register Agent inbound webhook if agent inbound is fully configured.
-      let unregisterAgent;
-      // Per-account agent path: /webhooks/app for default, /webhooks/app/{accountId} for others.
-      const agentInboundPath = account.accountId === DEFAULT_ACCOUNT_ID
-        ? "/webhooks/app"
-        : `/webhooks/app/${account.accountId}`;
-      if (account.agentInboundConfigured) {
-        if (botPath === agentInboundPath) {
-          logger.error("WeCom: Agent inbound path conflicts with Bot webhook path, skipping Agent registration", {
-            path: agentInboundPath,
-          });
-        } else {
-          const agentCfg = account.config.agent;
-          unregisterAgent = registerWebhookTarget({
-            path: agentInboundPath,
-            account: {
-              ...account,
-              // Agent inbound uses its own token/encodingAesKey for callback verification.
-              agentInbound: {
-                accountId: account.accountId,
-                token: agentCfg.token,
-                encodingAesKey: agentCfg.encodingAesKey,
-                corpId: agentCfg.corpId,
-                corpSecret: agentCfg.corpSecret,
-                agentId: agentCfg.agentId,
-              },
-            },
-            config: ctx.cfg,
-          });
-          logger.info("WeCom Agent inbound webhook registered", { path: agentInboundPath });
-        }
-      }
-
-      const shutdown = async () => {
-        logger.info("WeCom gateway shutting down");
-        // Clear pending debounce timers to prevent post-shutdown dispatches.
-        for (const [, buf] of messageBuffers) {
-          clearTimeout(buf.timer);
-        }
-        messageBuffers.clear();
-        if (unregister) unregister();
-        if (unregisterAgent) unregisterAgent();
+      const resolved = resolveAccount(nextCfg, accountId);
+      return {
+        cleared,
+        envToken: false,
+        loggedOut: !resolved.botId && !resolved.secret,
       };
-
-      // Backward compatibility: older runtime may not pass abortSignal.
-      // In that case, keep legacy behavior and expose explicit shutdown.
-      if (!ctx.abortSignal) {
-        return { shutdown };
-      }
-
-      if (ctx.abortSignal.aborted) {
-        await shutdown();
-        return;
-      }
-
-      await new Promise((resolve) => {
-        ctx.abortSignal.addEventListener("abort", resolve, { once: true });
-      });
-
-      await shutdown();
     },
   },
+};
+
+export const wecomChannelPluginTesting = {
+  buildUnsupportedMediaNotice,
 };

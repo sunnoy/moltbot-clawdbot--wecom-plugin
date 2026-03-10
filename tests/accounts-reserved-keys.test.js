@@ -29,7 +29,7 @@ describe("RESERVED_KEYS — dictionary mode (issue #79)", () => {
     assert.deepEqual(ids, ["bot1"]);
   });
 
-  it("does not treat 'commands', 'dynamicAgents', 'dm', 'groupChat' as account IDs", () => {
+  it("does not treat 'commands', 'dynamicAgents', 'dm', 'groupChat', 'welcomeMessage' as account IDs", () => {
     const cfg = {
       channels: {
         wecom: {
@@ -41,6 +41,7 @@ describe("RESERVED_KEYS — dictionary mode (issue #79)", () => {
           dynamicAgents: { enabled: true },
           dm: { createAgentOnFirstMessage: true },
           groupChat: { enabled: true },
+          welcomeMessage: "hello",
           adminUsers: ["admin1"],
           workspaceTemplate: "/path/to/templates",
           instances: [],
@@ -69,6 +70,6 @@ describe("RESERVED_KEYS — dictionary mode (issue #79)", () => {
     assert.deepEqual(ids, ["default"]);
 
     const account = resolveAccount(cfg, "default");
-    assert.equal(account.token, "legacy-tok");
+    assert.equal(account.config.token, "legacy-tok");
   });
 });
