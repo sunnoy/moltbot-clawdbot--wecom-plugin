@@ -64,6 +64,10 @@ const LEGACY_STATE_DIRNAMES = [".clawdbot", ".moldbot", ".moltbot"];
 const MAX_REPLY_MSG_ITEMS = 10;
 const MAX_REPLY_IMAGE_BYTES = 10 * 1024 * 1024;
 const REASONING_STREAM_THROTTLE_MS = 800;
+const VISIBLE_STREAM_THROTTLE_MS = 800;
+// Reserve headroom below the SDK's per-reqId queue limit (100) so the final
+// reply always has room.
+const MAX_INTERMEDIATE_STREAM_MESSAGES = 85;
 // Match MEDIA:/FILE: directives at line start, optionally preceded by markdown list markers.
 const REPLY_MEDIA_DIRECTIVE_PATTERN = /^\s*(?:[-*•]\s+|\d+\.\s+)?(?:MEDIA|FILE)\s*:/im;
 const WECOM_REPLY_MEDIA_GUIDANCE_HEADER = "[WeCom reply media rule]";
@@ -78,6 +82,11 @@ function withTimeout(promise, timeoutMs, message) {
   const timeout = new Promise((_, reject) => {
     timer = setTimeout(() => reject(new Error(message ?? `Timed out after ${timeoutMs}ms`)), timeoutMs);
   });
+
+  // Suppress unhandled rejection from the original promise if the timeout wins
+  // the race. Without this, a later rejection from the underlying SDK call
+  // becomes an unhandled promise rejection.
+  promise.catch(() => {});
 
   return Promise.race([promise, timeout]).finally(() => {
     if (timer) {
@@ -1026,12 +1035,21 @@ async function processWsMessage({ frame, account, config, runtime, wsClient }) {
   const state = { accumulatedText: "", reasoningText: "", streamId, replyMediaUrls: [] };
   setMessageState(messageId, state);
 
-  // Throttle reasoning stream updates to avoid exceeding the SDK's per-reqId queue limit (100).
+  // Throttle reasoning and visible text stream updates to avoid exceeding
+  // the SDK's per-reqId reply queue limit (100).
+  let streamMessagesSent = 0;
   let lastReasoningSendAt = 0;
   let pendingReasoningTimer = null;
+  let lastVisibleSendAt = 0;
+  let pendingVisibleTimer = null;
+
+  const canSendIntermediate = () => streamMessagesSent < MAX_INTERMEDIATE_STREAM_MESSAGES;
+
   const sendReasoningUpdate = async () => {
+    if (!canSendIntermediate()) return;
     lastReasoningSendAt = Date.now();
     try {
+      streamMessagesSent++;
       await sendWsReply({
         wsClient,
         frame,
@@ -1049,12 +1067,42 @@ async function processWsMessage({ frame, account, config, runtime, wsClient }) {
     }
   };
 
-  const cleanupState = () => {
-    deleteMessageState(messageId);
+  const sendVisibleUpdate = async () => {
+    if (!canSendIntermediate()) return;
+    lastVisibleSendAt = Date.now();
+    try {
+      streamMessagesSent++;
+      await sendWsReply({
+        wsClient,
+        frame,
+        streamId: state.streamId,
+        text: buildWsStreamContent({
+          reasoningText: state.reasoningText,
+          visibleText: state.accumulatedText,
+          finish: false,
+        }),
+        finish: false,
+        accountId: account.accountId,
+      });
+    } catch (error) {
+      logger.warn(`[WS] Visible stream send failed (non-fatal): ${error.message}`);
+    }
+  };
+
+  const cancelPendingTimers = () => {
     if (pendingReasoningTimer) {
       clearTimeout(pendingReasoningTimer);
       pendingReasoningTimer = null;
     }
+    if (pendingVisibleTimer) {
+      clearTimeout(pendingVisibleTimer);
+      pendingVisibleTimer = null;
+    }
+  };
+
+  const cleanupState = () => {
+    deleteMessageState(messageId);
+    cancelPendingTimers();
   };
 
   if (account.sendThinkingMessage !== false) {
@@ -1168,18 +1216,19 @@ async function processWsMessage({ frame, account, config, runtime, wsClient }) {
 
                 state.accumulatedText += chunk;
                 if (info.kind !== "final") {
-                  await sendWsReply({
-                    wsClient,
-                    frame,
-                    streamId: state.streamId,
-                    text: buildWsStreamContent({
-                      reasoningText: state.reasoningText,
-                      visibleText: state.accumulatedText,
-                      finish: false,
-                    }),
-                    finish: false,
-                    accountId: account.accountId,
-                  });
+                  // Throttle visible text stream updates to avoid exceeding
+                  // the SDK queue limit together with reasoning updates.
+                  const elapsed = Date.now() - lastVisibleSendAt;
+                  if (elapsed < VISIBLE_STREAM_THROTTLE_MS) {
+                    if (!pendingVisibleTimer) {
+                      pendingVisibleTimer = setTimeout(async () => {
+                        pendingVisibleTimer = null;
+                        await sendVisibleUpdate();
+                      }, VISIBLE_STREAM_THROTTLE_MS - elapsed);
+                    }
+                    return;
+                  }
+                  await sendVisibleUpdate();
                 }
               },
               onError: (error, info) => {
@@ -1189,6 +1238,10 @@ async function processWsMessage({ frame, account, config, runtime, wsClient }) {
           });
         },
       );
+
+      // Cancel pending throttled timers before the final reply to prevent
+      // non-final updates from being sent after finish=true.
+      cancelPendingTimers();
 
       const preparedReplyMedia = await prepareReplyMediaOutputs({
         payload: { mediaUrls: state.replyMediaUrls },
@@ -1213,22 +1266,26 @@ async function processWsMessage({ frame, account, config, runtime, wsClient }) {
         logger.warn("[WS] Agent API is not configured; passive non-image media delivery was skipped");
       }
 
-      if (finalWsText || msgItem.length > 0) {
+      // If dispatch returned no content at all (e.g. upstream empty_stream),
+      // send a fallback so the user isn't left waiting in silence.
+      const effectiveFinalText = finalWsText || (msgItem.length === 0 ? "模型暂时无法响应，请稍后重试。" : "");
+      if (effectiveFinalText || msgItem.length > 0) {
         logger.info("[WS] Sending passive final reply", {
           accountId: account.accountId,
           agentId: route.agentId,
           streamId: state.streamId,
-          textLength: finalWsText.length,
+          textLength: effectiveFinalText.length,
           imageItemCount: msgItem.length,
           deferredAgentMediaCount: preparedReplyMedia.agentMedia.length,
           mirroredAgentImageCount: preparedReplyMedia.mirroredAgentMedia.length,
+          emptyStreamFallback: !finalWsText,
         });
         try {
           await sendWsReply({
             wsClient,
             frame,
             streamId: state.streamId,
-            text: finalWsText,
+            text: effectiveFinalText,
             finish: true,
             msgItem,
             accountId: account.accountId,
@@ -1241,7 +1298,7 @@ async function processWsMessage({ frame, account, config, runtime, wsClient }) {
             senderId,
           });
           enqueuePendingReply(account.accountId, {
-            text: finalWsText,
+            text: effectiveFinalText,
             senderId,
             chatId,
             isGroupChat,

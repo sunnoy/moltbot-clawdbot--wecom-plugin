@@ -23,7 +23,7 @@ describe("upsertAgentIdOnlyEntry", () => {
 
     assert.equal(changed, true);
     assert.deepEqual(cfg.agents.list, [
-      { id: "main" },
+      { id: "main", heartbeat: {} },
       { id: "wecom-dm-lirui", heartbeat: {} },
     ]);
   });

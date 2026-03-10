@@ -157,8 +157,10 @@ export function upsertAgentIdOnlyEntry(cfg, agentId) {
   const nextList = [...currentList];
 
   // Keep "main" as the explicit default when creating agents.list for the first time.
+  // Include heartbeat: {} so main inherits agents.defaults.heartbeat even when
+  // dynamic agents also have explicit heartbeat entries (hasExplicitHeartbeatAgents).
   if (nextList.length === 0) {
-    nextList.push({ id: "main" });
+    nextList.push({ id: "main", heartbeat: {} });
     existingIds.add("main");
     changed = true;
   }
@@ -185,7 +187,7 @@ export async function ensureDynamicAgentListed(agentId, templateDir) {
 
   const runtime = getRuntime();
   const configRuntime = runtime?.config;
-  if (!configRuntime?.loadConfig || !configRuntime?.writeConfigFile) {
+  if (!configRuntime?.writeConfigFile) {
     return;
   }
 
@@ -196,10 +198,26 @@ export async function ensureDynamicAgentListed(agentId, templateDir) {
         return;
       }
 
-      // Upsert into memory only. Writing to config file is dangerous and can wipe user settings.
+      // Upsert into in-memory config so the running gateway sees it immediately.
       const changed = upsertAgentIdOnlyEntry(openclawConfig, normalizedId);
       if (changed) {
         logger.info("WeCom: dynamic agent added to in-memory agents.list", { agentId: normalizedId });
+
+        // Persist to disk so `openclaw agents list` (separate process) can see
+        // the dynamic agent and it survives gateway restarts.
+        // Write the mutated in-memory config directly (same pattern as logoutAccount).
+        // NOTE: loadConfig() returns runtimeConfigSnapshot in gateway mode — the same
+        // object we already mutated above — so a read-modify-write pattern silently
+        // skips the write (diskChanged=false). Writing directly avoids this.
+        try {
+          await configRuntime.writeConfigFile(openclawConfig);
+          logger.info("WeCom: dynamic agent persisted to config file", { agentId: normalizedId });
+        } catch (writeErr) {
+          logger.warn("WeCom: failed to persist dynamic agent to config file", {
+            agentId: normalizedId,
+            error: writeErr?.message || String(writeErr),
+          });
+        }
       }
       
       // Always attempt seeding so recreated/cleaned dynamic agents can recover

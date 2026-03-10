@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.0.1 (2026-03-10)
+
+### Fixes
+
+- **动态 Agent 配置持久化**: `ensureDynamicAgentListed` 改为直接写入已变更的内存配置（与 `logoutAccount` 一致），修复因 `loadConfig()` 在 gateway 运行时返回相同内存快照导致写入被跳过的问题，新动态 Agent 现在会正确持久化到磁盘配置文件
+- **Main Agent 心跳丢失**: 初始化 `agents.list` 时为 main 条目添加 `heartbeat: {}`，防止动态 Agent 注册后 main 的心跳调度被意外排除（`hasExplicitHeartbeatAgents` 逻辑）
+
+### Notes
+
+- **SDK 100 条队列限制**: 企微 `@wecom/aibot-node-sdk` 对每个 `reqId` 的回复队列上限为 100 条（`maxReplyQueueSize=100`），超出后直接 reject。官方插件未做任何节流处理，完全依赖 core 的 buffered dispatcher 自然控制频率。本插件因额外支持 reasoning stream，中间消息量更大，保留了 `MAX_INTERMEDIATE_STREAM_MESSAGES=85` 上限 + 800ms 时间节流双重防护
+
 ## 1.9.0 (2026-03-06)
 
 ### Features
