@@ -90,6 +90,11 @@ export const TOKEN_REFRESH_BUFFER_MS = 60 * 1000;
 export const AGENT_API_REQUEST_TIMEOUT_MS = 15 * 1000;
 export const MAX_REQUEST_BODY_SIZE = 1024 * 1024;
 
+// Callback (self-built app HTTP inbound) constants
+export const CALLBACK_INBOUND_MAX_BODY_BYTES = 1 * 1024 * 1024;
+export const CALLBACK_MEDIA_DOWNLOAD_TIMEOUT_MS = 30_000;
+export const CALLBACK_TIMESTAMP_TOLERANCE_S = 300;
+
 export function getWebhookBotSendUrl() {
   return `${resolveApiBaseUrl()}/cgi-bin/webhook/send`;
 }

@@ -76,7 +76,8 @@ export async function getAccessToken(agent) {
  * @param {string} params.text
  */
 export async function agentSendText(params) {
-  const { agent, toUser, toParty, toTag, chatId, text } = params;
+  const { agent, toUser, toParty, toTag, chatId, text, format = "text" } = params;
+  const msgtype = format === "markdown" ? "markdown" : "text";
   const token = await getAccessToken(agent);
 
   const useChat = Boolean(chatId);
@@ -85,14 +86,14 @@ export async function agentSendText(params) {
     : `${AGENT_API_ENDPOINTS.SEND_MESSAGE}?access_token=${encodeURIComponent(token)}`;
 
   const body = useChat
-    ? { chatid: chatId, msgtype: "text", text: { content: text } }
+    ? { chatid: chatId, msgtype, [msgtype]: { content: text } }
     : {
         touser: toUser,
         toparty: toParty,
         totag: toTag,
-        msgtype: "text",
+        msgtype,
         agentid: agent.agentId,
-        text: { content: text },
+        [msgtype]: { content: text },
       };
 
   const res = await wecomFetch(url, {
@@ -103,7 +104,7 @@ export async function agentSendText(params) {
   const json = await res.json();
 
   if (json?.errcode !== 0) {
-    throw new Error(`agent send text failed: ${json?.errcode} ${json?.errmsg}`);
+    throw new Error(`agent send ${msgtype} failed: ${json?.errcode} ${json?.errmsg}`);
   }
 
   if (json?.invaliduser || json?.invalidparty || json?.invalidtag) {
@@ -114,7 +115,7 @@ export async function agentSendText(params) {
     ]
       .filter(Boolean)
       .join(", ");
-    throw new Error(`agent send text partial failure: ${details}`);
+    throw new Error(`agent send ${msgtype} partial failure: ${details}`);
   }
 }
 

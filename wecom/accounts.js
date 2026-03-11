@@ -157,6 +157,14 @@ function buildAccount(accountId, config, meta = {}) {
   const configured = Boolean(botId && secret);
   const agentConfigured = Boolean(agent.corpId && agent.corpSecret && agent.agentId);
 
+  const callbackRaw = isPlainObject(agent.callback) ? agent.callback : {};
+  const callbackToken = String(callbackRaw.token ?? "").trim();
+  const callbackAESKey = String(callbackRaw.encodingAESKey ?? "").trim();
+  const callbackPath = String(callbackRaw.path ?? "").trim() || "/api/channels/wecom/callback";
+  const callbackConfigured = Boolean(callbackToken && callbackAESKey && agent.corpId);
+  // "markdown" enables WeCom markdown format for agent API replies; default "markdown"
+  const agentReplyFormat = String(agent.replyFormat ?? "markdown").trim() === "text" ? "text" : "markdown";
+
   return {
     accountId,
     name: String(safeConfig.name ?? accountId ?? DEFAULT_ACCOUNT_ID).trim() || accountId,
@@ -171,12 +179,22 @@ function buildAccount(accountId, config, meta = {}) {
     storageMode: meta.storageMode ?? "dictionary",
     entryKey: meta.entryKey ?? accountId,
     agentConfigured,
+    callbackConfigured,
     webhooksConfigured: isPlainObject(safeConfig.webhooks) && Object.keys(safeConfig.webhooks).length > 0,
+    agentReplyFormat,
     agentCredentials: agentConfigured
       ? {
           corpId: String(agent.corpId),
           corpSecret: String(agent.corpSecret),
           agentId: agent.agentId,
+        }
+      : null,
+    callbackConfig: callbackConfigured
+      ? {
+          token: callbackToken,
+          encodingAESKey: callbackAESKey,
+          path: callbackPath,
+          corpId: String(agent.corpId),
         }
       : null,
   };

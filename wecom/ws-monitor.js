@@ -877,8 +877,9 @@ function buildInboundContext({
     OriginatingChannel: CHANNEL_ID,
     OriginatingTo: isGroupChat ? `${CHANNEL_ID}:group:${chatId}` : `${CHANNEL_ID}:${senderId}`,
     CommandAuthorized: true,
-    ReqId: frame.headers.req_id,
-    WeComFrame: frame,
+    // frame is null for callback-inbound path; use body.msgid as fallback
+    ReqId: frame?.headers?.req_id ?? body?.msgid ?? "",
+    WeComFrame: frame ?? null,
   };
 
   if (mediaList.length > 0) {
@@ -931,6 +932,17 @@ async function processWsMessage({ frame, account, config, runtime, wsClient }) {
   const { textParts, imageUrls, imageAesKeys, fileUrls, fileAesKeys, quoteContent } = parseMessageContent(body);
   const originalText = textParts.join("\n").trim();
   let text = originalText;
+
+  logger.info(`[WS:${account.accountId}] ← inbound`, {
+    senderId,
+    chatId,
+    isGroupChat,
+    messageId,
+    textLength: originalText.length,
+    imageCount: imageUrls.length,
+    fileCount: fileUrls.length,
+    preview: originalText.slice(0, 80) || (imageUrls.length ? "[image]" : fileUrls.length ? "[file]" : ""),
+  });
 
   if (!text && quoteContent) {
     text = quoteContent;
@@ -1542,3 +1554,11 @@ export const wsMonitorTesting = {
 };
 
 export { buildReplyMediaGuidance };
+
+// Shared internals used by callback-inbound.js
+export {
+  buildInboundContext,
+  resolveChannelCore,
+  normalizeReplyPayload,
+  resolveReplyMediaLocalRoots,
+};

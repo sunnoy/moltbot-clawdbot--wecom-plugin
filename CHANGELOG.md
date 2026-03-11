@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.1.0 (2026-03-11)
+
+### Features
+
+- **自建应用 Agent 回调入站通道**: 支持企微自建应用"接收消息"HTTP 回调模式作为独立入站渠道。在 `agent.callback` 配置 `token`、`encodingAESKey`、`path` 即可启用；路由自动注册，与 WS 通道并行运行
+- **Agent API 回复支持 Markdown**: `agentSendText` 新增 `format` 参数（`"text"` | `"markdown"`），回调入站回复默认为 `"markdown"`；可通过 `agent.replyFormat` 配置项覆盖
+- **入站/出站信息日志**: WS 入站 `[WS:account] ← inbound`、CB 入站 `[CB:account] ← inbound`、CB 出站 `[CB:account] → outbound` 三条 INFO 日志，便于在 gateway 日志中追踪消息流
+
 ## 2.0.2 (2026-03-11)
 
 ### Fixes

@@ -308,6 +308,22 @@ export const wecomChannelPlugin = {
         allowFrom: { type: "array", items: { type: "string" } },
         groupPolicy: { enum: ["open", "allowlist", "disabled"] },
         groupAllowFrom: { type: "array", items: { type: "string" } },
+        agent: {
+          type: "object",
+          additionalProperties: true,
+          properties: {
+            replyFormat: { enum: ["text", "markdown"] },
+            callback: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                token: { type: "string" },
+                encodingAESKey: { type: "string" },
+                path: { type: "string" },
+              },
+            },
+          },
+        },
       },
     },
     uiHints: {
@@ -316,6 +332,10 @@ export const wecomChannelPlugin = {
       websocketUrl: { label: "WebSocket URL", placeholder: DEFAULT_WS_URL },
       welcomeMessage: { label: "Welcome Message" },
       "agent.corpSecret": { sensitive: true, label: "Application Secret" },
+      "agent.replyFormat": { label: "Reply Format", placeholder: "text" },
+      "agent.callback.token": { label: "Callback Token" },
+      "agent.callback.encodingAESKey": { label: "Callback Encoding AES Key", sensitive: true },
+      "agent.callback.path": { label: "Callback Path", placeholder: "/api/channels/wecom/callback" },
     },
   },
   config: {
@@ -324,7 +344,8 @@ export const wecomChannelPlugin = {
     defaultAccountId: (cfg) => resolveDefaultAccountId(cfg),
     setAccountEnabled: ({ cfg, accountId, enabled }) => updateAccountConfig(cfg, accountId, { enabled }),
     deleteAccount: ({ cfg, accountId }) => deleteAccountConfig(cfg, accountId),
-    isConfigured: (account) => Boolean(account.botId && account.secret),
+    isConfigured: (account) =>
+      Boolean((account.botId && account.secret) || account.callbackConfigured),
     describeAccount,
     resolveAllowFrom: ({ cfg, accountId }) => resolveAllowFromForAccount(cfg, accountId),
     formatAllowFrom: ({ allowFrom }) => normalizeAllowFromEntries(allowFrom.map((entry) => String(entry))),

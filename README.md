@@ -9,6 +9,8 @@
 
 > **⚠️ 从 HTTP 回调迁移到长连接：** 2.0 版本完全采用企业微信 [AI 机器人 WebSocket 长连接模式](https://open.work.weixin.qq.com/help2/pc/cat?doc_id=21657)。如果你之前使用 HTTP 回调（Token + EncodingAESKey + 回调 URL），需要在企业微信管理后台将机器人切换到长连接模式，然后删除旧的回调配置。切换后只需 `botId` 和 `secret` 即可接入。
 
+> **2.1 新增：** 在 WS 长连接之外，2.1 版本新增了企业微信**自建应用"接收消息"HTTP 回调**作为可选入站通道。在 `channels.wecom.agent` 下配置 `callback.token`、`callback.encodingAESKey`、`callback.path` 即可同时启用，与 WS 通道并行运行，互不影响。
+
 ## 相比官方插件的增强特性
 
 下表列出了本插件相比 [官方 WeCom OpenClaw 插件](https://github.com/WecomTeam/wecom-openclaw-plugin)（[npm](https://www.npmjs.com/package/@wecom/wecom-openclaw-plugin)）额外提供的能力：
@@ -42,6 +44,9 @@
 | **入站图文混排**（`mixed` 消息拆解为文本 + 图片） | ❌ | ✅ |
 | **入站语音转写**（`voice.content` 自动提取） | ❌ | ✅ |
 | **入站引用消息**（`quote` 上下文透传） | ❌ | ✅ |
+| **自建应用回调入站**（HTTP 回调作为独立入站通道，与 WS 并行） | ❌ | ✅ |
+| **Agent API Markdown 回复**（回调入站回复默认 markdown 格式） | ❌ | ✅ |
+| **入站/出站信息日志**（WS / CB 收发日志，便于追踪消息流） | ❌ | ✅ |
 
 ## 目录
 
@@ -55,6 +60,7 @@
 - [企业微信侧配置](#企业微信侧配置)
 - [消息能力与投递策略](#消息能力与投递策略)
 - [动态 Agent 与路由](#动态-agent-与路由)
+- [自建应用回调入站](#自建应用回调入站)
 - [常见问题](#常见问题)
 - [项目结构](#项目结构)
 - [自定义 Skills 配合沙箱使用实践](#自定义-skills-配合沙箱使用实践)
@@ -209,11 +215,15 @@ npm test
 | `channels.wecom.agent.corpId` | string | 否 | 自建应用 CorpID |
 | `channels.wecom.agent.corpSecret` | string | 否 | 自建应用 Secret |
 | `channels.wecom.agent.agentId` | number | 否 | 自建应用 AgentId |
+| `channels.wecom.agent.replyFormat` | string | 否 | 回调入站回复格式，`"markdown"`（默认）或 `"text"` |
+| `channels.wecom.agent.callback.token` | string | 否 | 回调验签 Token |
+| `channels.wecom.agent.callback.encodingAESKey` | string | 否 | 回调消息解密密钥（43 位） |
+| `channels.wecom.agent.callback.path` | string | 否 | 回调 HTTP 路由路径，如 `"/webhooks/app"` |
 | `channels.wecom.webhooks` | object | 否 | 群机器人 webhook 映射 |
 | `channels.wecom.network.egressProxyUrl` | string | 否 | Agent / Webhook 出站代理 |
 | `channels.wecom.network.apiBaseUrl` | string | 否 | 企业微信 API 基础地址覆盖，默认官方地址 |
 
-Agent 增强出站不需要 `token`、`encodingAesKey`、回调 URL。
+Agent 增强出站不需要 `token`、`encodingAesKey`、回调 URL；只有需要同时启用**回调入站**时才需配置 `agent.callback.*`。
 
 ### 多账号示例
 
@@ -295,13 +305,18 @@ Agent 增强出站不需要 `token`、`encodingAesKey`、回调 URL。
 
 长连接模式下不需要配置 HTTP 回调 URL、Token、EncodingAESKey。
 
-### 2. 创建自建应用（Agent 增强出站，可选）
+### 2. 创建自建应用（Agent 增强出站 + 可选回调入站）
 
-Agent 在本项目里只承担增强出站：
+自建应用承担两个可选职责：
 
+**增强出站**（主动推送消息）：
 - 主动给用户 / 群 / 部门 / 标签发消息
 - 上传图片和文件
 - 当 WS 断连时作为回复后备通道
+
+**回调入站**（可选，与 WS 并行）：
+- 企业微信将用户消息以 HTTP POST 推送到你的服务器
+- 适合需要独立入站 URL 或不方便使用 WS 长连接的场景
 
 创建步骤：
 
@@ -311,8 +326,7 @@ Agent 在本项目里只承担增强出站：
    - `channels.wecom.agent.corpId`
    - `channels.wecom.agent.agentId`
    - `channels.wecom.agent.corpSecret`
-
-不需要配置接收消息回调。
+4. **仅启用回调入站时**，额外在应用的「接收消息」中配置回调 URL，并填入对应的 `agent.callback.*` 配置（见[自建应用回调入站](#自建应用回调入站)）
 
 ### 3. 配置群机器人（Webhook 增强出站，可选）
 
@@ -329,8 +343,8 @@ Webhook 只负责群通知。
 
 | 能力 | Bot（WS） | Agent API | Webhook |
 | --- | :---: | :---: | :---: |
-| 私聊接收 | ✅ | — | — |
-| 群聊接收（可配置 @ 触发） | ✅ | — | — |
+| 私聊接收 | ✅ | ✅（回调入站） | — |
+| 群聊接收（可配置 @ 触发） | ✅ | ✅（回调入站） | — |
 | 被动流式回复 | ✅ | — | — |
 | 被动最终帧图片 | ✅ | ✅ | ✅ |
 | 主动发送文本 | ✅ | ✅ | ✅ |
@@ -431,6 +445,63 @@ Webhook 只负责群通知。
 
 如果 OpenClaw 配置了 `bindings`，则优先按 binding 路由，不会被动态 Agent 覆盖。
 
+## 自建应用回调入站
+
+自建应用的「接收消息」HTTP 回调可作为额外的入站通道，与 WS 长连接并行运行，互不干扰。适合已有自建应用的场景，或需要独立回调 URL 的情况。
+
+### 配置
+
+在 `channels.wecom.agent` 下增加 `callback` 子对象：
+
+```json
+{
+  "channels": {
+    "wecom": {
+      "botId": "aib-xxx",
+      "secret": "bot-secret-xxx",
+      "agent": {
+        "corpId": "wwxxxxxxxxxxxx",
+        "corpSecret": "app-secret-xxx",
+        "agentId": 1000002,
+        "replyFormat": "markdown",
+        "callback": {
+          "token": "YourToken",
+          "encodingAESKey": "43位密钥",
+          "path": "/webhooks/app"
+        }
+      }
+    }
+  }
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `agent.callback.token` | 企业微信「接收消息」里配置的 Token |
+| `agent.callback.encodingAESKey` | 43 位 EncodingAESKey |
+| `agent.callback.path` | Gateway 监听的 HTTP 路径，需与企业微信后台填写的 URL 一致 |
+| `agent.replyFormat` | 回复格式，`"markdown"`（默认）或 `"text"` |
+
+### 企业微信侧配置
+
+1. 进入自建应用 → 「接收消息」
+2. 填写 URL：`https://<your-gateway-host>:<port><path>`（例如 `https://example.com:18789/webhooks/app`）
+3. 填写 Token 和 EncodingAESKey（与配置保持一致）
+4. 点击「保存」，企业微信将发送 GET 请求验证（gateway 会自动回复 echostr）
+5. 验证通过后，用户发给自建应用的消息将通过 HTTP POST 推送到 gateway
+
+### 支持的消息类型
+
+| 类型 | 说明 |
+| --- | --- |
+| `text` | 文本消息 |
+| `image` | 图片（通过 Agent API 下载） |
+| `voice` | 语音文件 |
+| `file` | 文件 |
+| `video` | 视频文件 |
+
+事件类消息（关注、进入会话等）会被静默忽略。
+
 ## 常见问题
 
 ### Q: 2.0 和之前最大的区别是什么？
@@ -500,6 +571,9 @@ openclaw-plugin-wecom/
 │   ├── accounts.js               # 多账号管理与配置继承
 │   ├── agent-api.js              # Agent API（Token、发送、上传）
 │   ├── allow-from.js             # allowlist 规范化与匹配
+│   ├── callback-crypto.js        # 回调 AES 解密与签名验证
+│   ├── callback-inbound.js       # 自建应用回调入站处理
+│   ├── callback-media.js         # 回调媒体下载
 │   ├── channel-plugin.js         # 核心通道（sendNotice / sendMedia）
 │   ├── commands.js               # 指令白名单与命令拦截
 │   ├── constants.js              # 常量定义
@@ -518,6 +592,8 @@ openclaw-plugin-wecom/
 └── tests/
     ├── accounts-reserved-keys.test.js
     ├── api-base-url.test.js
+    ├── callback-crypto.test.js
+    ├── callback-inbound.test.js
     ├── channel-plugin.media-type.test.js
     ├── channel-plugin.notice.test.js
     ├── dynamic-agent.test.js
