@@ -989,7 +989,7 @@ async function processWsMessage({ frame, account, config, runtime, wsClient }) {
       });
       return;
     }
-    text = extractGroupMessageContent(originalText, account.config).replace(/@\S+/g, "").trim();
+    text = extractGroupMessageContent(originalText, account.config);
   }
 
   const senderIsAdmin = isWecomAdmin(senderId, account.config);

@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.0.2 (2026-03-11)
+
+### Fixes
+
+- **群聊正文中的 `@` 标识误删**: 移除 WeCom 群消息进入 Agent 前对所有 `@...` token 的二次清洗，避免将 `callerUri="...@H323"`、`calleeUri="...@CONFNO"` 这类正文内容误判为 mention 并截断
+
+### Tests
+
+- 新增群聊回归测试，覆盖 `@H323` / `@CONFNO` 在入站上下文中的保留行为
+- 新增 `extractGroupMessageContent()` 单测，验证 mention 去除与正文 `@` token 保留可同时成立
+
 ## 2.0.1 (2026-03-10)
 
 ### Fixes

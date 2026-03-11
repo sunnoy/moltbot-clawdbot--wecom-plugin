@@ -424,6 +424,35 @@ describe("WS e2e", () => {
     }
   });
 
+  it("preserves @ tokens inside group-message identifiers", async () => {
+    const harness = await startHarness({
+      replyPayloadFactory: () => ({ text: "规则已收到" }),
+    });
+    const content =
+      '- record: sum:callerUri:0\n  expr: sum by(type,callerUri,calleeUri) (sum_over_time(statis_alarm_metrics{type="call_start",callerUri="113.57.121.58**615872@H323",calleeUri="9005271803@CONFNO"}[5m]))';
+
+    try {
+      harness.wsClient.emit(
+        "message",
+        createMessageFrame({
+          chattype: "group",
+          chatid: "wrqUsLDAAAj02j6hsqmKsPSKnNLUZP3A",
+          from: { userid: "guoyonghang" },
+          msgtype: "text",
+          text: { content },
+        }),
+      );
+
+      await eventually(() => assert.equal(harness.runtime.ctxs.length, 1));
+      assert.equal(harness.runtime.ctxs[0].RawBody, content);
+      assert.match(harness.runtime.ctxs[0].RawBody, /@H323/);
+      assert.match(harness.runtime.ctxs[0].RawBody, /@CONFNO/);
+      assert.equal(harness.wsClient.replyStreamCalls[0].content, "规则已收到");
+    } finally {
+      await harness.stop();
+    }
+  });
+
   it("covers inbound image messages end-to-end", async () => {
     const imageUrl = "https://example.com/input.png";
     const harness = await startHarness({
