@@ -8,6 +8,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { logger } from "../logger.js";
 import { wecomChannelPlugin } from "../wecom/channel-plugin.js";
+import { DEFAULT_WELCOME_MESSAGES } from "../wecom/constants.js";
 import { getAccountTelemetry, resetRuntimeTelemetryForTesting } from "../wecom/runtime-telemetry.js";
 import { resetStateForTesting, setOpenclawConfig, setRuntime } from "../wecom/state.js";
 import { startWsMonitor } from "../wecom/ws-monitor.js";
@@ -1078,6 +1079,22 @@ describe("WS e2e", () => {
       assert.equal(getAccountTelemetry("default").connection.displaced, true);
     } finally {
       logger.info = originalInfo;
+    }
+  });
+
+  it("uses one of the built-in welcome templates when no welcomeMessage is configured", async () => {
+    const harness = await startHarness({
+      replyPayloadFactory: () => null,
+    });
+
+    try {
+      harness.wsClient.emit("event.enter_chat", createEventFrame("enter_chat"));
+      await eventually(() => assert.equal(harness.wsClient.replyWelcomeCalls.length, 1));
+
+      const welcomeText = harness.wsClient.replyWelcomeCalls[0].body.text.content;
+      assert.ok(DEFAULT_WELCOME_MESSAGES.includes(welcomeText));
+    } finally {
+      await harness.stop();
     }
   });
 

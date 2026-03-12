@@ -28,9 +28,79 @@ export const PENDING_REPLY_MAX_SIZE = 50;
 
 export const DEFAULT_MEDIA_MAX_MB = 5;
 export const TEXT_CHUNK_LIMIT = 4000;
-export const DEFAULT_WELCOME_MESSAGE = ["你好，我是 AI 助手。", "", "可用命令：", "/new", "/compact", "/help", "/status"].join(
-  "\n",
-);
+export const DEFAULT_WELCOME_MESSAGES = [
+  [
+    "新的一天，元气满满！🌞",
+    "",
+    "你可以通过斜杠指令管理会话：",
+    "/new 新建对话",
+    "/compact 压缩对话",
+    "/help 帮助",
+    "/status 查看状态",
+    "/reasoning stream 打开思考动画",
+  ].join("\n"),
+  [
+    "终于唤醒我啦，我已经准备就绪！😄",
+    "",
+    "试试这些常用指令：",
+    "/new 新建对话",
+    "/compact 压缩对话",
+    "/help 帮助",
+    "/status 查看状态",
+    "/reasoning stream 打开思考动画",
+  ].join("\n"),
+  [
+    "欢迎回来，准备开始今天的工作吧！✨",
+    "",
+    "会话管理指令：",
+    "/new 新建对话",
+    "/compact 压缩对话",
+    "/help 帮助",
+    "/status 查看状态",
+    "/reasoning stream 打开思考动画",
+  ].join("\n"),
+  [
+    "嗨，我已经在线！🤖",
+    "",
+    "你可以先试试这些命令：",
+    "/new 新建对话",
+    "/compact 压缩对话",
+    "/help 帮助",
+    "/status 查看状态",
+    "/reasoning stream 打开思考动画",
+  ].join("\n"),
+  [
+    "今天也一起高效开工吧！🚀",
+    "",
+    "先来看看这些指令：",
+    "/new 新建对话",
+    "/compact 压缩对话",
+    "/help 帮助",
+    "/status 查看状态",
+    "/reasoning stream 打开思考动画",
+  ].join("\n"),
+  [
+    "叮咚，你的数字助手已就位！🎉",
+    "",
+    "常用操作给你备好了：",
+    "/new 新建对话",
+    "/compact 压缩对话",
+    "/help 帮助",
+    "/status 查看状态",
+    "/reasoning stream 打开思考动画",
+  ].join("\n"),
+  [
+    "灵感加载完成，随时可以开聊！💡",
+    "",
+    "你可以这样开始：",
+    "/new 新建对话",
+    "/compact 压缩对话",
+    "/help 帮助",
+    "/status 查看状态",
+    "/reasoning stream 打开思考动画",
+  ].join("\n"),
+];
+export const DEFAULT_WELCOME_MESSAGE = DEFAULT_WELCOME_MESSAGES[0];
 
 export const MEDIA_CACHE_DIR = join(process.env.HOME || "/tmp", ".openclaw", "media", "wecom");
 

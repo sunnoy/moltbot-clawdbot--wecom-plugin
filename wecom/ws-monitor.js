@@ -20,6 +20,7 @@ import {
   CHANNEL_ID,
   DEFAULT_MEDIA_MAX_MB,
   DEFAULT_WELCOME_MESSAGE,
+  DEFAULT_WELCOME_MESSAGES,
   FILE_DOWNLOAD_TIMEOUT_MS,
   IMAGE_DOWNLOAD_TIMEOUT_MS,
   MEDIA_DOCUMENT_PLACEHOLDER,
@@ -554,7 +555,12 @@ async function deliverPassiveAgentMedia({
 
 function resolveWelcomeMessage(account) {
   const configured = String(account?.config?.welcomeMessage ?? "").trim();
-  return configured || DEFAULT_WELCOME_MESSAGE;
+  if (configured) {
+    return configured;
+  }
+
+  const index = Math.floor(Math.random() * DEFAULT_WELCOME_MESSAGES.length);
+  return DEFAULT_WELCOME_MESSAGES[index] || DEFAULT_WELCOME_MESSAGE;
 }
 
 function collectMixedMessageItems({ mixed, textParts, imageUrls, imageAesKeys }) {
