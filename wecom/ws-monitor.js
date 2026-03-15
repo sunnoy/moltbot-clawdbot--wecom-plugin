@@ -357,10 +357,18 @@ function resolveAgentWorkspaceDir(config, agentId) {
   return path.join(stateDir, `workspace-${normalizedAgentId}`);
 }
 
+function resolveConfiguredReplyMediaLocalRoots(config) {
+  const roots = Array.isArray(config?.channels?.[CHANNEL_ID]?.mediaLocalRoots)
+    ? config.channels[CHANNEL_ID].mediaLocalRoots
+    : [];
+  return roots.map((entry) => resolveUserPath(entry)).filter(Boolean);
+}
+
 function resolveReplyMediaLocalRoots(config, agentId) {
   const workspaceDir = resolveAgentWorkspaceDir(config, agentId || resolveDefaultAgentId(config));
   const browserMediaDir = path.join(resolveStateDir(), "media", "browser");
-  return [...new Set([workspaceDir, browserMediaDir].map((entry) => path.resolve(entry)))];
+  const configuredRoots = resolveConfiguredReplyMediaLocalRoots(config);
+  return [...new Set([workspaceDir, browserMediaDir, ...configuredRoots].map((entry) => path.resolve(entry)))];
 }
 
 function mergeReplyMediaUrls(...lists) {
@@ -387,12 +395,12 @@ function mergeReplyMediaUrls(...lists) {
 function buildReplyMediaGuidance(config, agentId) {
   const workspaceDir = resolveAgentWorkspaceDir(config, agentId || resolveDefaultAgentId(config));
   const browserMediaDir = path.join(resolveStateDir(), "media", "browser");
-  return [
+  const configuredRoots = resolveConfiguredReplyMediaLocalRoots(config);
+  const guidance = [
     WECOM_REPLY_MEDIA_GUIDANCE_HEADER,
     `Local reply files are allowed only under the current workspace: ${workspaceDir}`,
     "Inside the agent sandbox, that same workspace is visible as /workspace.",
     `Browser-generated files are also allowed only under: ${browserMediaDir}`,
-    "Never reference any other host path.",
     "Do NOT call message.send or message.sendAttachment to deliver files back to the current WeCom chat/user; use MEDIA: or FILE: directives instead.",
     "For images: put each image path on its own line as MEDIA:/abs/path.",
     "If a local file is in the current sandbox workspace, use its /workspace/... path directly.",
@@ -402,7 +410,14 @@ function buildReplyMediaGuidance(config, agentId) {
     "CRITICAL: If a tool already returned a path prefixed with FILE: (e.g. FILE:/abs/path.pdf), keep the FILE: prefix exactly as-is. Do NOT change it to MEDIA:.",
     "Each directive MUST be on its own line with no other text on that line.",
     "The plugin will automatically send the media to the user.",
-  ].join("\n");
+  ];
+
+  if (configuredRoots.length > 0) {
+    guidance.push(`Additional configured host roots are also allowed: ${configuredRoots.join(", ")}`);
+  }
+
+  guidance.push("Never reference any other host path.");
+  return guidance.join("\n");
 }
 
 function normalizeReplyMediaUrlForLoad(mediaUrl, config, agentId) {
@@ -1072,6 +1087,14 @@ async function processWsMessage({ frame, account, config, runtime, wsClient, req
       return;
     }
     text = extractGroupMessageContent(originalText, account.config);
+    if (!text.trim() && imageUrls.length === 0 && fileUrls.length === 0) {
+      logger.debug("[WS] Group message mention stripped to empty content; skipping reply", {
+        accountId: account.accountId,
+        chatId,
+        senderId,
+      });
+      return;
+    }
   }
 
   const senderIsAdmin = isWecomAdmin(senderId, account.config);

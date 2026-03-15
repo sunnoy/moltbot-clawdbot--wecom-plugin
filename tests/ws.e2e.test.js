@@ -516,6 +516,38 @@ describe("WS e2e", () => {
     }
   });
 
+  it("skips mention-only group messages instead of replying with a completion placeholder", async () => {
+    const harness = await startHarness({
+      configOverrides: {
+        groupChat: {
+          enabled: true,
+          requireMention: true,
+          mentionPatterns: ["@bot"],
+        },
+      },
+      replyPayloadFactory: () => ({ text: "不应发送" }),
+    });
+
+    try {
+      harness.wsClient.emit(
+        "message",
+        createMessageFrame({
+          chattype: "group",
+          chatid: "wr-group-empty-mention",
+          from: { userid: "guoyonghang" },
+          msgtype: "text",
+          text: { content: "@bot" },
+        }),
+      );
+
+      await delay(100);
+      assert.equal(harness.runtime.ctxs.length, 0);
+      assert.equal(harness.wsClient.replyStreamCalls.length, 0);
+    } finally {
+      await harness.stop();
+    }
+  });
+
   it("covers inbound image messages end-to-end", async () => {
     const imageUrl = "https://example.com/input.png";
     const harness = await startHarness({
@@ -816,6 +848,40 @@ describe("WS e2e", () => {
       const finals = harness.wsClient.replyStreamCalls.filter((c) => c.finish);
       assert.ok(finals.length >= 1);
       assert.ok(finals[0].content.includes("文件发送失败：没有权限访问路径"));
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it("allows passive reply files from configured mediaLocalRoots", async () => {
+    const customMediaDir = path.join(tempDir, "reply-local-root");
+    const customPdfPath = path.join(customMediaDir, "report.pdf");
+    await mkdir(customMediaDir, { recursive: true });
+    await writeFile(customPdfPath, Buffer.from("reply-pdf"));
+
+    const harness = await startHarness({
+      configOverrides: {
+        mediaLocalRoots: [customMediaDir],
+      },
+      replyPayloadFactory: () => ({
+        text: `附件如下\nFILE:${customPdfPath}`,
+      }),
+    });
+
+    try {
+      harness.wsClient.emit(
+        "message",
+        createMessageFrame({
+          msgtype: "text",
+          text: { content: "把配置目录里的 PDF 发我" },
+        }),
+      );
+
+      await eventually(() => assert.equal(harness.wsClient.uploadMediaCalls.length, 1));
+      await eventually(() => assert.equal(harness.wsClient.sendMediaMessageCalls.length, 1));
+      const finals = harness.wsClient.replyStreamCalls.filter((c) => c.finish);
+      assert.ok(finals.length >= 1);
+      assert.ok(finals[0].content.includes("附件如下"));
     } finally {
       await harness.stop();
     }
