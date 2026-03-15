@@ -2,7 +2,11 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
-import { wsMonitorTesting, buildReplyMediaGuidance } from "../wecom/ws-monitor.js";
+import {
+  wsMonitorTesting,
+  buildReplyMediaGuidance,
+  resolveReplyMediaLocalRoots,
+} from "../wecom/ws-monitor.js";
 
 const { splitReplyMediaFromText, buildBodyForAgent, normalizeReplyMediaUrlForLoad } = wsMonitorTesting;
 
@@ -109,6 +113,38 @@ describe("buildReplyMediaGuidance", () => {
     assert.ok(guidance.includes("SKILL.md"));
     assert.ok(guidance.includes("path prefixed with FILE:"));
     assert.ok(guidance.includes("its own line"));
+  });
+
+  it("includes configured host media roots in guidance", () => {
+    const guidance = buildReplyMediaGuidance(
+      {
+        channels: {
+          wecom: {
+            mediaLocalRoots: ["/tmp/reply-media"],
+          },
+        },
+      },
+      "test-agent",
+    );
+    assert.ok(guidance.includes("Additional configured host roots are also allowed: /tmp/reply-media"));
+  });
+});
+
+describe("resolveReplyMediaLocalRoots", () => {
+  it("merges configured mediaLocalRoots with workspace and browser roots", () => {
+    const roots = resolveReplyMediaLocalRoots(
+      {
+        channels: {
+          wecom: {
+            mediaLocalRoots: ["/tmp/reply-media"],
+          },
+        },
+      },
+      "test-agent",
+    );
+    assert.ok(roots.includes("/tmp/reply-media"));
+    assert.ok(roots.includes(path.join(os.homedir(), ".openclaw", "workspace-test-agent")));
+    assert.ok(roots.includes(path.join(os.homedir(), ".openclaw", "media", "browser")));
   });
 });
 
