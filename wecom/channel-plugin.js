@@ -36,6 +36,7 @@ import {
 } from "./constants.js";
 import { uploadAndSendMedia } from "./media-uploader.js";
 import { getExtendedMediaLocalRoots } from "./openclaw-compat.js";
+import { extractParentAgentId } from "./parent-resolver.js";
 import { sendWsMessage, startWsMonitor } from "./ws-monitor.js";
 import { getWsClient } from "./ws-state.js";
 
@@ -404,6 +405,7 @@ export const wecomChannelPlugin = {
       try {
         if (!target.toParty && !target.toTag) {
           const wsTarget = target.chatId || target.toUser || to;
+          logger.debug(`[wecom] sendText: trying WS accountId=${resolvedAccountId} target=${wsTarget}`);
           return await sendWsMessage({
             to: wsTarget,
             content: text,
@@ -411,9 +413,17 @@ export const wecomChannelPlugin = {
           });
         }
       } catch (error) {
-        logger.warn(`[wecom] WS sendText failed, falling back to Agent API: ${error.message}`);
+        logger.warn(`[wecom] WS sendText failed (accountId=${resolvedAccountId}), falling back: ${error.message}`);
       }
 
+      // Webhook fallback for accounts without Agent API (e.g. WS bot mode)
+      const account = resolveAccount(cfg, resolvedAccountId);
+      if (!account?.agentCredentials && account?.config?.webhooks?.default) {
+        logger.debug(`[wecom] sendText: Agent API unavailable, using webhook fallback accountId=${resolvedAccountId}`);
+        return sendViaWebhook({ cfg, accountId: resolvedAccountId, webhookName: "default", text });
+      }
+
+      logger.debug(`[wecom] sendText: trying Agent API accountId=${resolvedAccountId}`);
       return sendViaAgent({
         cfg,
         accountId: resolvedAccountId,
@@ -629,6 +639,55 @@ export const wecomChannelPlugin = {
         envToken: false,
         loggedOut: !resolved.botId && !resolved.secret,
       };
+    },
+  },
+  hooks: {
+    /**
+     * Ensure announce delivery uses a valid WeCom channel accountId.
+     *
+     * When a dynamic agent (e.g. wecom-yoyo-dm-xxx) spawns a sub-agent,
+     * the announce delivery may reference the dynamic agent ID as accountId.
+     * This hook resolves it to the actual WeCom account (e.g. yoyo) so the
+     * outbound sendText can find valid WS/Agent API credentials.
+     */
+    subagent_delivery_target: async (event, ctx) => {
+      const origin = event.requesterOrigin;
+      if (!origin?.channel || origin.channel !== CHANNEL_ID) return;
+
+      const cfg = ctx?.cfg ?? getOpenclawConfig();
+
+      // Check whether current accountId already resolves to a valid account
+      const currentAccount = resolveAccount(cfg, origin.accountId);
+      if (currentAccount?.enabled) return;
+
+      // Try to extract the base account from a dynamic agent ID
+      const baseId = extractParentAgentId(origin.accountId);
+      if (baseId && baseId !== origin.accountId) {
+        const baseAccount = resolveAccount(cfg, baseId);
+        if (baseAccount?.enabled) {
+          logger.info(`[wecom] subagent_delivery_target: ${origin.accountId} → ${baseId}`);
+          return { origin: { ...origin, accountId: baseId } };
+        }
+      }
+
+      // Fallback to default account
+      const defaultId = resolveDefaultAccountId(cfg);
+      if (defaultId && defaultId !== origin.accountId) {
+        logger.info(`[wecom] subagent_delivery_target: fallback → ${defaultId}`);
+        return { origin: { ...origin, accountId: defaultId } };
+      }
+    },
+
+    subagent_spawned: async (event) => {
+      logger.info(
+        `[wecom] subagent spawned: child=${event.childSessionKey} requester=${event.requesterSessionKey}`,
+      );
+    },
+
+    subagent_ended: async (event) => {
+      logger.info(
+        `[wecom] subagent ended: target=${event.targetSessionKey} reason=${event.reason} outcome=${event.outcome}`,
+      );
     },
   },
 };
