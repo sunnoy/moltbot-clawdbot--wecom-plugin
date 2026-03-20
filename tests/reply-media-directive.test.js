@@ -113,6 +113,7 @@ describe("buildReplyMediaGuidance", () => {
     assert.ok(guidance.includes("SKILL.md"));
     assert.ok(guidance.includes("path prefixed with FILE:"));
     assert.ok(guidance.includes("its own line"));
+    assert.ok(!guidance.includes("[WeCom image_studio rule]"));
   });
 
   it("includes configured host media roots in guidance", () => {
@@ -127,6 +128,31 @@ describe("buildReplyMediaGuidance", () => {
       "test-agent",
     );
     assert.ok(guidance.includes("Additional configured host roots are also allowed: /tmp/reply-media"));
+  });
+
+  it("injects image_studio guidance only when qwenImageTools is enabled", () => {
+    const guidance = buildReplyMediaGuidance(
+      {
+        plugins: {
+          entries: {
+            wecom: {
+              config: {
+                qwenImageTools: {
+                  enabled: true,
+                },
+              },
+            },
+          },
+        },
+      },
+      "test-agent",
+    );
+    assert.ok(guidance.includes("[WeCom image_studio rule]"));
+    assert.ok(guidance.includes('action="generate"'));
+    assert.ok(guidance.includes('action="edit"'));
+    assert.ok(guidance.includes("/workspace/..."));
+    assert.ok(guidance.includes('aspect="landscape"'));
+    assert.ok(guidance.includes('model_preference="qwen"'));
   });
 });
 
@@ -145,6 +171,47 @@ describe("resolveReplyMediaLocalRoots", () => {
     assert.ok(roots.includes("/tmp/reply-media"));
     assert.ok(roots.includes(path.join(os.homedir(), ".openclaw", "workspace-test-agent")));
     assert.ok(roots.includes(path.join(os.homedir(), ".openclaw", "media", "browser")));
+  });
+
+  it("merges account-level mediaLocalRoots in multi-account mode", () => {
+    const roots = resolveReplyMediaLocalRoots(
+      {
+        channels: {
+          wecom: {
+            defaultAccount: "main",
+            main: {
+              botId: "bot1",
+              secret: "sec1",
+              mediaLocalRoots: ["/tmp/account-media"],
+            },
+          },
+        },
+      },
+      "test-agent",
+    );
+    assert.ok(roots.includes("/tmp/account-media"), `expected /tmp/account-media in ${roots}`);
+  });
+
+  it("includes account-level mediaLocalRoots in guidance (multi-account mode)", () => {
+    const guidance = buildReplyMediaGuidance(
+      {
+        channels: {
+          wecom: {
+            defaultAccount: "main",
+            main: {
+              botId: "bot1",
+              secret: "sec1",
+              mediaLocalRoots: ["/tmp/account-media"],
+            },
+          },
+        },
+      },
+      "test-agent",
+    );
+    assert.ok(
+      guidance.includes("/tmp/account-media"),
+      `expected /tmp/account-media in guidance`,
+    );
   });
 });
 

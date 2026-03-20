@@ -263,6 +263,7 @@ export const wecomChannelPlugin = {
         websocketUrl: { type: "string" },
         sendThinkingMessage: { type: "boolean" },
         welcomeMessage: { type: "string" },
+        welcomeMessagesFile: { type: "string" },
         dmPolicy: { enum: ["pairing", "allowlist", "open", "disabled"] },
         allowFrom: { type: "array", items: { type: "string" } },
         groupPolicy: { enum: ["open", "allowlist", "disabled"] },
@@ -292,6 +293,10 @@ export const wecomChannelPlugin = {
       secret: { label: "Secret", sensitive: true },
       websocketUrl: { label: "WebSocket URL", placeholder: DEFAULT_WS_URL },
       welcomeMessage: { label: "Welcome Message" },
+      welcomeMessagesFile: {
+        label: "Welcome Messages File",
+        placeholder: "welcome-messages.json",
+      },
       "agent.corpSecret": { sensitive: true, label: "Application Secret" },
       "agent.replyFormat": { label: "Reply Format", placeholder: "text" },
       "agent.callback.token": { label: "Callback Token" },

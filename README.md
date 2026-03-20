@@ -180,7 +180,8 @@ npm test
 | `channels.wecom.secret` | string | 是 | 企业微信 AI 机器人 Secret |
 | `channels.wecom.websocketUrl` | string | 否 | WS 地址，默认 `wss://openws.work.weixin.qq.com` |
 | `channels.wecom.sendThinkingMessage` | boolean | 否 | 是否先发送 `<think></think>` 占位，默认 `true` |
-| `channels.wecom.welcomeMessage` | string | 否 | 进入会话欢迎语 |
+| `channels.wecom.welcomeMessage` | string | 否 | 进入会话欢迎语（非空时固定使用该字符串） |
+| `channels.wecom.welcomeMessagesFile` | string | 否 | 欢迎语列表文件路径。支持：`{ "messages": [ ... ] }` 或顶层数组；每条欢迎语可为**一行一个字符串的数组**（推荐，易读），或单条字符串（可含 `\\n`）。相对路径基于 OpenClaw 状态目录（`~/.openclaw` 或 `OPENCLAW_STATE_DIR`）。未设置 `welcomeMessage` 时从该文件随机选取；**修改文件后无需重启服务**（按 mtime 自动重读） |
 | `channels.wecom.adminUsers` | string[] | 否 | 管理员用户 ID，可绕过命令白名单 |
 | `channels.wecom.defaultAccount` | string | 否 | 多账号模式默认账号 |
 

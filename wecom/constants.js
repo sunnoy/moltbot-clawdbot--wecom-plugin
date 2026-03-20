@@ -47,7 +47,8 @@ export const DEFAULT_WELCOME_MESSAGES = [
     "/compact 压缩对话",
     "/help 帮助",
     "/status 查看状态",
-    "/reasoning stream 打开思考动画",
+    "你可以让我生成和编辑图片了",
+    "你可以用语音跟我对话",
   ].join("\n"),
   [
     "终于唤醒我啦，我已经准备就绪！😄",
@@ -57,7 +58,8 @@ export const DEFAULT_WELCOME_MESSAGES = [
     "/compact 压缩对话",
     "/help 帮助",
     "/status 查看状态",
-    "/reasoning stream 打开思考动画",
+    "你可以让我生成和编辑图片了",
+    "你可以用语音跟我对话",
   ].join("\n"),
   [
     "欢迎回来，准备开始今天的工作吧！✨",
@@ -67,7 +69,8 @@ export const DEFAULT_WELCOME_MESSAGES = [
     "/compact 压缩对话",
     "/help 帮助",
     "/status 查看状态",
-    "/reasoning stream 打开思考动画",
+    "你可以让我生成和编辑图片了",
+    "你可以用语音跟我对话",
   ].join("\n"),
   [
     "嗨，我已经在线！🤖",
@@ -77,7 +80,8 @@ export const DEFAULT_WELCOME_MESSAGES = [
     "/compact 压缩对话",
     "/help 帮助",
     "/status 查看状态",
-    "/reasoning stream 打开思考动画",
+    "你可以让我生成和编辑图片了",
+    "你可以用语音跟我对话",
   ].join("\n"),
   [
     "今天也一起高效开工吧！🚀",
@@ -87,7 +91,8 @@ export const DEFAULT_WELCOME_MESSAGES = [
     "/compact 压缩对话",
     "/help 帮助",
     "/status 查看状态",
-    "/reasoning stream 打开思考动画",
+    "你可以让我生成和编辑图片了",
+    "你可以用语音跟我对话",
   ].join("\n"),
   [
     "叮咚，你的数字助手已就位！🎉",
@@ -97,7 +102,8 @@ export const DEFAULT_WELCOME_MESSAGES = [
     "/compact 压缩对话",
     "/help 帮助",
     "/status 查看状态",
-    "/reasoning stream 打开思考动画",
+    "你可以让我生成和编辑图片了",
+    "你可以用语音跟我对话",
   ].join("\n"),
   [
     "灵感加载完成，随时可以开聊！💡",
@@ -107,7 +113,8 @@ export const DEFAULT_WELCOME_MESSAGES = [
     "/compact 压缩对话",
     "/help 帮助",
     "/status 查看状态",
-    "/reasoning stream 打开思考动画",
+    "你可以让我生成和编辑图片了",
+    "你可以用语音跟我对话",
   ].join("\n"),
 ];
 export const DEFAULT_WELCOME_MESSAGE = DEFAULT_WELCOME_MESSAGES[0];

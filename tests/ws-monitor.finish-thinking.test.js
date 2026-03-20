@@ -42,4 +42,45 @@ describe("finishThinkingStream", () => {
       msgItem: undefined,
     });
   });
+
+  it("closes a media-only image reply with visible completion text", async () => {
+    const calls = [];
+    const wsClient = {
+      isConnected: true,
+      async replyStream(frame, streamId, content, finish, msgItem) {
+        calls.push({ frame, streamId, content, finish, msgItem });
+      },
+    };
+    const frame = {
+      body: {
+        from: { userid: "lirui" },
+      },
+    };
+
+    await finishThinkingStream({
+      wsClient,
+      frame,
+      accountId: "default",
+      state: {
+        accumulatedText: "",
+        reasoningText: "",
+        streamId: "stream-2",
+        hasMedia: true,
+        hasImageMedia: true,
+        hasFileMedia: false,
+        hasMediaFailed: false,
+        mediaErrorSummary: "",
+        waitingModelSeconds: 31,
+      },
+    });
+
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0], {
+      frame,
+      streamId: "stream-2",
+      content: "<think>等待模型响应 31s</think>\n图片已生成，请查收。",
+      finish: true,
+      msgItem: undefined,
+    });
+  });
 });

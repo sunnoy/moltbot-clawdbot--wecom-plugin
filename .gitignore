@@ -20,6 +20,9 @@ pnpm-debug.log*
 *.tgz
 local.md
 local.sh
+
+# Local welcome list (copy to OPENCLAW_STATE_DIR on deploy; see README)
+welcome-messages.json
 test.sh
 AGENTS.md
 plans/

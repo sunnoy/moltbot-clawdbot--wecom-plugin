@@ -60,7 +60,7 @@
     "author": "",
     "license": "ISC",
     "dependencies": {
-        "@wecom/aibot-node-sdk": "^1.0.2",
+        "@wecom/aibot-node-sdk": "^1.0.3",
         "file-type": "^21.3.0"
     }
 }

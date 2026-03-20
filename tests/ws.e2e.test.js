@@ -679,6 +679,41 @@ describe("WS e2e", () => {
     }
   });
 
+  it("keeps a visible completion message for media-only WS replies", async () => {
+    const workspaceDir = path.join(tempDir, "workspace");
+    const replyImagePath = path.join(workspaceDir, "reply-only.png");
+    await mkdir(path.dirname(replyImagePath), { recursive: true });
+    await writeFile(
+      replyImagePath,
+      Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aU9sAAAAASUVORK5CYII=", "base64"),
+    );
+
+    const harness = await startHarness({
+      replyPayloadFactory: () => ({
+        text: `MEDIA:${replyImagePath}`,
+      }),
+    });
+
+    try {
+      harness.wsClient.emit(
+        "message",
+        createMessageFrame({
+          msgtype: "text",
+          text: { content: "直接给我图片" },
+        }),
+      );
+
+      await eventually(() => assert.equal(harness.wsClient.uploadMediaCalls.length, 1));
+      await eventually(() => assert.equal(harness.wsClient.sendMediaMessageCalls.length, 1));
+      const finals = harness.wsClient.replyStreamCalls.filter((c) => c.finish);
+      assert.ok(finals.length >= 1);
+      assert.ok(finals[0].content.includes("图片已生成，请查收。"));
+      assert.ok(finals[0].content.includes("<think>"));
+    } finally {
+      await harness.stop();
+    }
+  });
+
   it("parses FILE lines from passive reply text and uploads via WS", async () => {
     const workspaceDir = path.join(tempDir, "workspace");
     const replyPdfPath = path.join(workspaceDir, "report.pdf");
@@ -1236,6 +1271,52 @@ describe("WS e2e", () => {
 
       const welcomeText = harness.wsClient.replyWelcomeCalls[0].body.text.content;
       assert.ok(DEFAULT_WELCOME_MESSAGES.includes(welcomeText));
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it("uses welcomeMessagesFile (JSON array) when welcomeMessage is unset", async () => {
+    const welcomePath = path.join(tempDir, "welcome-list.json");
+    await writeFile(
+      welcomePath,
+      JSON.stringify(["仅来自文件的欢迎 A", "仅来自文件的欢迎 B"]),
+      "utf8",
+    );
+
+    const harness = await startHarness({
+      replyPayloadFactory: () => null,
+      configOverrides: {
+        welcomeMessagesFile: "welcome-list.json",
+      },
+    });
+
+    try {
+      harness.wsClient.emit("event.enter_chat", createEventFrame("enter_chat"));
+      await eventually(() => assert.equal(harness.wsClient.replyWelcomeCalls.length, 1));
+      const welcomeText = harness.wsClient.replyWelcomeCalls[0].body.text.content;
+      assert.ok(["仅来自文件的欢迎 A", "仅来自文件的欢迎 B"].includes(welcomeText));
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it("welcomeMessage takes precedence over welcomeMessagesFile", async () => {
+    const welcomePath = path.join(tempDir, "welcome-list.json");
+    await writeFile(welcomePath, JSON.stringify(["from-file-only"]), "utf8");
+
+    const harness = await startHarness({
+      replyPayloadFactory: () => null,
+      configOverrides: {
+        welcomeMessage: "固定欢迎",
+        welcomeMessagesFile: "welcome-list.json",
+      },
+    });
+
+    try {
+      harness.wsClient.emit("event.enter_chat", createEventFrame("enter_chat"));
+      await eventually(() => assert.equal(harness.wsClient.replyWelcomeCalls.length, 1));
+      assert.equal(harness.wsClient.replyWelcomeCalls[0].body.text.content, "固定欢迎");
     } finally {
       await harness.stop();
     }

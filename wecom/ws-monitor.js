@@ -63,6 +63,8 @@ import {
   startMessageStateCleanup,
 } from "./ws-state.js";
 import { ensureDynamicAgentListed } from "./workspace-template.js";
+import { listAccountIds, resolveAccount } from "./accounts.js";
+import { loadWelcomeMessagesFromFile } from "./welcome-messages-file.js";
 
 const DEFAULT_AGENT_ID = "main";
 const DEFAULT_STATE_DIRNAME = ".openclaw";
@@ -136,6 +138,11 @@ function buildWaitingModelContent(seconds) {
     lines.push(`等待模型响应 ${current}s`);
   }
   return `<think>${lines.join("\n")}`;
+}
+
+function buildWaitingModelReasoningText(seconds) {
+  const normalizedSeconds = Math.max(1, Number.parseInt(String(seconds ?? 1), 10) || 1);
+  return `等待模型响应 ${normalizedSeconds}s`;
 }
 
 function buildWsStreamContent({ reasoningText = "", visibleText = "", finish = false }) {
@@ -360,10 +367,23 @@ function resolveAgentWorkspaceDir(config, agentId) {
 }
 
 function resolveConfiguredReplyMediaLocalRoots(config) {
-  const roots = Array.isArray(config?.channels?.[CHANNEL_ID]?.mediaLocalRoots)
+  const topLevel = Array.isArray(config?.channels?.[CHANNEL_ID]?.mediaLocalRoots)
     ? config.channels[CHANNEL_ID].mediaLocalRoots
     : [];
-  return roots.map((entry) => resolveUserPath(entry)).filter(Boolean);
+
+  // Also collect mediaLocalRoots from each account entry (multi-account mode).
+  // In single-account mode the account config IS the top-level config, so
+  // listAccountIds returns ["default"] and the roots are already in topLevel.
+  const accountRoots = [];
+  for (const accountId of listAccountIds(config)) {
+    const accountConfig = resolveAccount(config, accountId)?.config;
+    if (Array.isArray(accountConfig?.mediaLocalRoots)) {
+      accountRoots.push(...accountConfig.mediaLocalRoots);
+    }
+  }
+
+  const merged = [...new Set([...topLevel, ...accountRoots])];
+  return merged.map((entry) => resolveUserPath(entry)).filter(Boolean);
 }
 
 function resolveReplyMediaLocalRoots(config, agentId) {
@@ -398,6 +418,7 @@ function buildReplyMediaGuidance(config, agentId) {
   const workspaceDir = resolveAgentWorkspaceDir(config, agentId || resolveDefaultAgentId(config));
   const browserMediaDir = path.join(resolveStateDir(), "media", "browser");
   const configuredRoots = resolveConfiguredReplyMediaLocalRoots(config);
+  const qwenImageToolsConfig = config?.plugins?.entries?.wecom?.config?.qwenImageTools;
   const guidance = [
     WECOM_REPLY_MEDIA_GUIDANCE_HEADER,
     `Local reply files are allowed only under the current workspace: ${workspaceDir}`,
@@ -416,6 +437,19 @@ function buildReplyMediaGuidance(config, agentId) {
 
   if (configuredRoots.length > 0) {
     guidance.push(`Additional configured host roots are also allowed: ${configuredRoots.join(", ")}`);
+  }
+
+  if (qwenImageToolsConfig?.enabled === true) {
+    guidance.push(
+      "[WeCom image_studio rule]",
+      "When the user asks to generate an image, use image_studio with action=\"generate\".",
+      "When the user asks to edit an existing image, use image_studio with action=\"edit\" and pass images.",
+      "Use aspect=\"landscape\" for architecture diagrams, flowcharts, and banners unless the user asks otherwise.",
+      "Prefer model_preference=\"qwen\" for text-heavy diagrams or label-rich images, and model_preference=\"wan\" for photorealistic scenes.",
+      "For workspace-local images, always use /workspace/... paths when calling image_studio.",
+      "Prefer n=1 unless the user explicitly asks for multiple images.",
+      "If image_studio returns MEDIA: URLs, treat the image task as completed successfully.",
+    );
   }
 
   guidance.push("Never reference any other host path.");
@@ -563,6 +597,11 @@ async function sendMediaBatch({ wsClient, frame, state, account, runtime, config
 
     if (result.ok) {
       state.hasMedia = true;
+      if (result.finalType === "image") {
+        state.hasImageMedia = true;
+      } else {
+        state.hasFileMedia = true;
+      }
       if (result.downgraded) {
         logger.info(`[WS] Media downgraded: ${result.downgradeNote}`);
       }
@@ -601,7 +640,19 @@ async function finishThinkingStream({ wsClient, frame, state, accountId }) {
       finish: true,
     });
   } else if (state.hasMedia) {
-    finishText = "文件已发送，请查收。";
+    const mediaVisibleText = state.hasImageMedia && !state.hasFileMedia
+      ? "图片已生成，请查收。"
+      : "文件已发送，请查收。";
+    const fallbackReasoningText = state.waitingModelSeconds > 0
+      ? buildWaitingModelReasoningText(state.waitingModelSeconds)
+      : state.hasImageMedia && !state.hasFileMedia
+        ? "正在生成图片"
+        : "正在整理并发送文件";
+    finishText = buildWsStreamContent({
+      reasoningText: fallbackReasoningText,
+      visibleText: mediaVisibleText,
+      finish: true,
+    });
   } else if (state.hasMediaFailed && state.mediaErrorSummary) {
     finishText = state.mediaErrorSummary;
   } else {
@@ -622,6 +673,12 @@ function resolveWelcomeMessage(account) {
   const configured = String(account?.config?.welcomeMessage ?? "").trim();
   if (configured) {
     return configured;
+  }
+
+  const fromFile = loadWelcomeMessagesFromFile(account?.config);
+  if (fromFile?.length) {
+    const pick = Math.floor(Math.random() * fromFile.length);
+    return fromFile[pick];
   }
 
   const index = Math.floor(Math.random() * DEFAULT_WELCOME_MESSAGES.length);
@@ -1160,9 +1217,12 @@ async function processWsMessage({ frame, account, config, runtime, wsClient, req
     replyMediaUrls: [],
     pendingMediaUrls: [],
     hasMedia: false,
+    hasImageMedia: false,
+    hasFileMedia: false,
     hasMediaFailed: false,
     mediaErrorSummary: "",
     deliverCalled: false,
+    waitingModelSeconds: 0,
   };
   setMessageState(messageId, state);
 
@@ -1194,6 +1254,7 @@ async function processWsMessage({ frame, account, config, runtime, wsClient, req
 
   const sendWaitingModelUpdate = async (seconds) => {
     const waitingText = buildWaitingModelContent(seconds);
+    state.waitingModelSeconds = seconds;
     lastStreamSentAt = Date.now();
     lastNonEmptyStreamText = waitingText;
     try {
@@ -1523,6 +1584,7 @@ async function processWsMessage({ frame, account, config, runtime, wsClient, req
   if (account.sendThinkingMessage !== false) {
     waitingModelActive = true;
     waitingModelSeconds = 1;
+    state.waitingModelSeconds = waitingModelSeconds;
     await sendThinkingReply({
       wsClient,
       frame,
