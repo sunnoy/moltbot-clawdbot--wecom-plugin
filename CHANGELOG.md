@@ -1,5 +1,27 @@
 # Changelog
 
+## 2.3.0 (2026-03-20)
+
+相对 [v2.2.1](https://github.com/sunnoy/openclaw-plugin-wecom/releases/tag/v2.2.1) 的变更摘要。
+
+### Features
+
+- **欢迎语外链文件 `welcomeMessagesFile`**: 支持从 OpenClaw 状态目录下的 JSON 加载欢迎语列表（顶层数组、`{ "messages": [...] }`、或每条为行数组），按 mtime+size 缓存，**改文件无需重启 gateway**；`welcomeMessage` 仍优先生效
+- **可选 `image_studio` 工具**: 通过 `plugins.entries.wecom` 的 `qwenImageTools` 配置启用，对接通义/万相生图与编辑（`wecom/plugin-config.js` + `openclaw.plugin.json` schema）
+- **子 Agent 投递前公告（WS）**: `subagent announce delivery hooks`，便于在 WS 机器人模式下在子 Agent 回复前向用户展示状态（#133）
+
+### Fixes
+
+- **动态 Agent 继承主 Agent 配置**: 会话 key 含 channel，并以账户 `agentId` 为继承基准（#125）
+- **被动回复本地媒体与空群 @**: 修正媒体根路径与空 mention 场景（#120）
+- **部门 ID 误判**: 避免将正文中的电话号码误识别为部门 ID（#124）
+
+### Chore
+
+- 新增运维脚本：`scripts/set-reasoning-stream-remote.js`、`scripts/wecom-mcp-remote-probe.js`
+- `.gitignore` 增加本地 `welcome-messages.json`；删除过时迁移文档 `docs/official-1010-migration-plan.md`
+- 默认内置欢迎语补充图片编辑与语音对话说明（未配置外链文件时的回退文案）
+
 ## 2.1.0 (2026-03-11)
 
 ### Features
