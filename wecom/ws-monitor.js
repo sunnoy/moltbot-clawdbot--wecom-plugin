@@ -39,7 +39,6 @@ import {
 import { setConfigProxyUrl } from "./http.js";
 import { checkDmPolicy } from "./dm-policy.js";
 import { checkGroupPolicy } from "./group-policy.js";
-import { fetchAndSaveMcpConfig } from "./mcp-config.js";
 import {
   clearAccountDisplaced,
   forecastActiveSendQuota,
@@ -449,6 +448,9 @@ function buildReplyMediaGuidance(config, agentId) {
       "For workspace-local images, always use /workspace/... paths when calling image_studio.",
       "Prefer n=1 unless the user explicitly asks for multiple images.",
       "If image_studio returns MEDIA: URLs, treat the image task as completed successfully.",
+      "If image_studio returns MEDIA: URLs, do NOT repeat those URLs in the visible reply.",
+      "Do NOT embed markdown images, raw image URLs, or OSS links in the text reply after image_studio succeeds.",
+      "Instead, tell the user the image will be sent separately, for example: 图片会单独发送，请查收。",
     );
   }
 
@@ -1957,8 +1959,6 @@ export async function startWsMonitor({ account, config, runtime, abortSignal, ws
       logger.info(`[WS:${account.accountId}] Authenticated`);
       clearAccountDisplaced(account.accountId);
       setWsClient(account.accountId, wsClient);
-
-      void fetchAndSaveMcpConfig(wsClient, account.accountId, runtime);
 
       // Drain pending replies that failed due to prior WS disconnection.
       if (account?.agentCredentials && hasPendingReplies(account.accountId)) {

@@ -2,7 +2,6 @@
 import { spawnSync } from "node:child_process";
 
 const DEFAULT_HOST = "ali-ai";
-const DEFAULT_CATEGORIES = ["doc", "contact", "todo", "meeting", "schedule", "msg"];
 
 const REMOTE_NODE = String.raw`
 import fs from "node:fs";
@@ -14,7 +13,6 @@ import { WSClient, generateReqId } from "@wecom/aibot-node-sdk";
 const DEFAULT_WS_URL = "wss://qyapi.weixin.qq.com/cgi-bin/assistant/get_ticket";
 const DEFAULT_PLUGIN_VERSION = "1.0.12";
 const DEFAULT_PROTOCOL_VERSION = "2025-03-26";
-const DEFAULT_CATEGORIES = ["doc", "contact", "todo", "meeting", "schedule", "msg"];
 const DEFAULT_ACCOUNT_ID = "default";
 const MCP_GET_CONFIG_CMD = "aibot_get_mcp_config";
 const MCP_CONFIG_FETCH_TIMEOUT_MS = 15000;
@@ -72,22 +70,15 @@ const SHARED_MULTI_ACCOUNT_KEYS = new Set([
 
 function parseCliArgs(argv) {
   const args = {
-    categories: DEFAULT_CATEGORIES,
     account: "",
+    category: "",
+    method: "",
+    toolArgs: "{}",
     pluginVersion: "",
     protocolVersion: "",
   };
   for (let index = 0; index < argv.length; index += 1) {
     const current = argv[index];
-    if (current === "--categories" && argv[index + 1]) {
-      args.categories = argv[index + 1].split(",").map((item) => item.trim()).filter(Boolean);
-      index += 1;
-      continue;
-    }
-    if (current.startsWith("--categories=")) {
-      args.categories = current.split("=")[1].split(",").map((item) => item.trim()).filter(Boolean);
-      continue;
-    }
     if (current === "--account" && argv[index + 1]) {
       args.account = argv[index + 1].trim();
       index += 1;
@@ -95,6 +86,33 @@ function parseCliArgs(argv) {
     }
     if (current.startsWith("--account=")) {
       args.account = current.split("=")[1].trim();
+      continue;
+    }
+    if (current === "--category" && argv[index + 1]) {
+      args.category = argv[index + 1].trim();
+      index += 1;
+      continue;
+    }
+    if (current.startsWith("--category=")) {
+      args.category = current.split("=")[1].trim();
+      continue;
+    }
+    if (current === "--method" && argv[index + 1]) {
+      args.method = argv[index + 1].trim();
+      index += 1;
+      continue;
+    }
+    if (current.startsWith("--method=")) {
+      args.method = current.split("=")[1].trim();
+      continue;
+    }
+    if (current === "--args" && argv[index + 1]) {
+      args.toolArgs = argv[index + 1];
+      index += 1;
+      continue;
+    }
+    if (current.startsWith("--args=")) {
+      args.toolArgs = current.slice("--args=".length);
       continue;
     }
     if (current === "--pluginVersion" && argv[index + 1]) {
@@ -114,9 +132,6 @@ function parseCliArgs(argv) {
     if (current.startsWith("--protocolVersion=")) {
       args.protocolVersion = current.split("=")[1].trim();
     }
-  }
-  if (!args.categories.length) {
-    args.categories = DEFAULT_CATEGORIES;
   }
   return args;
 }
@@ -350,7 +365,7 @@ function normalizeUnsupported(result, category, stage) {
     : null;
 }
 
-function normalizeProbeError(error, category, stage) {
+function normalizeCallError(error, category, stage) {
   const unsupported = normalizeUnsupported(error, category, stage);
   if (unsupported) {
     return unsupported;
@@ -364,8 +379,20 @@ function normalizeProbeError(error, category, stage) {
   };
 }
 
+function parseToolArgs(rawArgs) {
+  const text = String(rawArgs ?? "").trim();
+  if (!text) {
+    return {};
+  }
+  const parsed = JSON.parse(text);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("args must be a JSON object");
+  }
+  return parsed;
+}
+
 async function fetchMcpConfig(wsClient, category, pluginVersion) {
-  const reqId = generateReqId("mcp_probe");
+  const reqId = generateReqId("mcp_call");
   const response = await withTimeout(
     wsClient.reply(
       { headers: { req_id: reqId } },
@@ -506,7 +533,7 @@ async function sendRawJsonRpc(url, sessionId, body) {
   }
 }
 
-async function listTools(url, protocolVersion) {
+async function callTool(url, protocolVersion, method, toolArgs) {
   let sessionId = null;
 
   const init = await sendRawJsonRpc(url, sessionId, {
@@ -516,7 +543,7 @@ async function listTools(url, protocolVersion) {
     params: {
       protocolVersion: protocolVersion || DEFAULT_PROTOCOL_VERSION,
       capabilities: {},
-      clientInfo: { name: "wecom_mcp_remote_probe", version: "1.0.0" },
+      clientInfo: { name: "wecom_mcp_remote_call", version: "1.0.0" },
     },
   });
   sessionId = init.sessionId;
@@ -527,47 +554,25 @@ async function listTools(url, protocolVersion) {
   });
   sessionId = initialized.sessionId;
 
-  const listed = await sendRawJsonRpc(url, sessionId, {
+  const called = await sendRawJsonRpc(url, sessionId, {
     jsonrpc: "2.0",
-    id: generateReqId("mcp_list"),
-    method: "tools/list",
+    id: generateReqId("mcp_call"),
+    method: "tools/call",
+    params: {
+      name: method,
+      arguments: toolArgs,
+    },
   });
 
-  return listed.result?.tools ?? [];
-}
-
-async function probeCategory(wsClient, args, category) {
-  let mcpConfig;
-  try {
-    mcpConfig = await fetchMcpConfig(wsClient, category, args.pluginVersion);
-  } catch (error) {
-    return normalizeProbeError(error, category, "get_mcp_config");
-  }
-  if (!mcpConfig.ok) {
-    return mcpConfig;
-  }
-
-  try {
-    const tools = await listTools(mcpConfig.url, args.protocolVersion);
-    return {
-      ok: true,
-      category,
-      url: mcpConfig.url,
-      transportType: mcpConfig.transportType,
-      isAuthed: mcpConfig.isAuthed,
-      toolCount: tools.length,
-      tools: tools.map((tool) => ({
-        name: tool.name,
-        description: tool.description ?? "",
-      })),
-    };
-  } catch (error) {
-    return normalizeProbeError(error, category, "tools/list");
-  }
+  return called.result;
 }
 
 async function main() {
   const args = parseCliArgs(process.argv.slice(2));
+  if (!args.category || !args.method) {
+    throw new Error("category and method are required");
+  }
+
   const configPath = resolveConfigPath();
   const config = parseConfigFile(configPath);
   const account = resolveAccount(config, args.account);
@@ -580,10 +585,33 @@ async function main() {
   }
 
   const wsClient = await waitForAuthenticatedClient(account);
-  const results = [];
+  let result;
   try {
-    for (const category of args.categories) {
-      results.push(await probeCategory(wsClient, args, category));
+    let mcpConfig;
+    try {
+      mcpConfig = await fetchMcpConfig(wsClient, args.category, args.pluginVersion);
+    } catch (error) {
+      result = normalizeCallError(error, args.category, "get_mcp_config");
+    }
+    if (result) {
+      // Skip tool call when MCP config fetch already failed.
+    } else if (!mcpConfig.ok) {
+      result = mcpConfig;
+    } else {
+      try {
+        const called = await callTool(mcpConfig.url, args.protocolVersion, args.method, parseToolArgs(args.toolArgs));
+        result = {
+          ok: true,
+          category: args.category,
+          method: args.method,
+          url: mcpConfig.url,
+          transportType: mcpConfig.transportType,
+          isAuthed: mcpConfig.isAuthed,
+          result: called,
+        };
+      } catch (error) {
+        result = normalizeCallError(error, args.category, "tools/call");
+      }
     }
   } finally {
     try {
@@ -594,11 +622,16 @@ async function main() {
   }
 
   console.log(JSON.stringify({
-    ok: true,
+    ok: result?.ok !== false,
     config_path: configPath,
     account_id: account.accountId,
-    categories: results,
+    category: args.category,
+    method: args.method,
+    call: result,
   }, null, 2));
+  if (result?.ok === false) {
+    process.exit(1);
+  }
 }
 
 try {
@@ -616,8 +649,10 @@ try {
 function parseArgs(argv) {
   const args = {
     host: DEFAULT_HOST,
-    categories: DEFAULT_CATEGORIES,
     account: "",
+    category: "",
+    method: "",
+    toolArgs: "{}",
     pluginVersion: "",
     protocolVersion: "",
     json: false,
@@ -633,15 +668,6 @@ function parseArgs(argv) {
       args.host = current.split("=")[1].trim();
       continue;
     }
-    if (current === "--categories" && argv[index + 1]) {
-      args.categories = argv[index + 1].split(",").map((item) => item.trim()).filter(Boolean);
-      index += 1;
-      continue;
-    }
-    if (current.startsWith("--categories=")) {
-      args.categories = current.split("=")[1].split(",").map((item) => item.trim()).filter(Boolean);
-      continue;
-    }
     if (current === "--account" && argv[index + 1]) {
       args.account = argv[index + 1].trim();
       index += 1;
@@ -649,6 +675,33 @@ function parseArgs(argv) {
     }
     if (current.startsWith("--account=")) {
       args.account = current.split("=")[1].trim();
+      continue;
+    }
+    if (current === "--category" && argv[index + 1]) {
+      args.category = argv[index + 1].trim();
+      index += 1;
+      continue;
+    }
+    if (current.startsWith("--category=")) {
+      args.category = current.split("=")[1].trim();
+      continue;
+    }
+    if (current === "--method" && argv[index + 1]) {
+      args.method = argv[index + 1].trim();
+      index += 1;
+      continue;
+    }
+    if (current.startsWith("--method=")) {
+      args.method = current.split("=")[1].trim();
+      continue;
+    }
+    if (current === "--args" && argv[index + 1]) {
+      args.toolArgs = argv[index + 1];
+      index += 1;
+      continue;
+    }
+    if (current.startsWith("--args=")) {
+      args.toolArgs = current.slice("--args=".length);
       continue;
     }
     if (current === "--pluginVersion" && argv[index + 1]) {
@@ -673,9 +726,6 @@ function parseArgs(argv) {
       args.json = true;
     }
   }
-  if (!args.categories.length) {
-    args.categories = DEFAULT_CATEGORIES;
-  }
   return args;
 }
 
@@ -683,9 +733,11 @@ function quoteShellArg(value) {
   return "'" + String(value).replace(/'/g, `'\"'\"'`) + "'";
 }
 
-function runRemoteProbe(options) {
+function runRemoteCall(options) {
   const remoteArgs = [
-    "--categories=" + options.categories.join(","),
+    "--category=" + options.category,
+    "--method=" + options.method,
+    "--args=" + options.toolArgs,
   ];
   if (options.account) {
     remoteArgs.push("--account=" + options.account);
@@ -701,7 +753,7 @@ function runRemoteProbe(options) {
   const remoteCommand =
     "tmp=" +
     pluginDir +
-    "/.cursor-wecom-mcp-remote-probe-$$.mjs" +
+    "/.cursor-wecom-mcp-remote-call-$$.mjs" +
     " && cat > \"$tmp\"" +
     " && cd " +
     pluginDir +
@@ -735,83 +787,36 @@ function runRemoteProbe(options) {
   };
 }
 
-function isUnsupportedCategory(entry) {
-  const message = String(entry?.errmsg ?? entry?.error ?? "").toLowerCase();
-  return entry?.errcode === 846609 || message.includes("unsupported mcp biz type");
-}
+function printHumanSummary(result, options) {
+  const parsed = result.parsed ?? {};
+  const call = parsed.call ?? {};
+  const account = (parsed.account_id ?? options.account) || "default";
 
-function summarize(parsed, host) {
-  const categories = Array.isArray(parsed?.categories) ? parsed.categories : [];
-  const summary = {
-    ok: Boolean(parsed?.ok),
-    host,
-    account_id: parsed?.account_id ?? "",
-    config_path: parsed?.config_path ?? "",
-    opened: [],
-    not_opened: [],
-    tools: {},
-    urls: {},
-    errors: {},
-  };
-
-  for (const entry of categories) {
-    const category = entry?.category;
-    if (!category) {
-      continue;
-    }
-    if (entry.ok) {
-      summary.opened.push(category);
-      summary.tools[category] = Array.isArray(entry.tools)
-        ? entry.tools.map((tool) => tool?.name).filter(Boolean)
-        : [];
-      summary.urls[category] = entry.url ?? "";
-      continue;
-    }
-    if (isUnsupportedCategory(entry)) {
-      summary.not_opened.push(category);
-      summary.errors[category] = {
-        stage: entry.stage ?? "tools/list",
-        errcode: entry.errcode ?? 846609,
-        errmsg: entry.errmsg ?? entry.error ?? "unsupported mcp biz type",
-      };
-      continue;
-    }
-    summary.errors[category] = {
-      stage: entry.stage ?? "unknown",
-      errcode: entry.errcode ?? -1,
-      errmsg: entry.errmsg ?? entry.error ?? "unknown error",
-    };
+  console.log("host: " + options.host);
+  console.log("account: " + account);
+  console.log("config: " + (parsed.config_path ?? "-"));
+  console.log("category: " + (parsed.category ?? options.category));
+  console.log("method: " + (parsed.method ?? options.method));
+  console.log("ok: " + (call.ok === true ? "yes" : "no"));
+  if (call.ok === true) {
+    console.log("mcp_url: " + (call.url ?? "-"));
+    console.log("transport: " + (call.transportType ?? "-"));
+    console.log("");
+    console.log(JSON.stringify(call.result ?? {}, null, 2));
+    return;
   }
 
-  summary.opened.sort();
-  summary.not_opened.sort();
-  return summary;
-}
-
-function printHumanSummary(summary, stderr) {
-  console.log("host: " + summary.host);
-  console.log("account: " + (summary.account_id || "-"));
-  console.log("config: " + (summary.config_path || "-"));
-  console.log("opened: " + (summary.opened.join(", ") || "-"));
-  console.log("not_opened: " + (summary.not_opened.join(", ") || "-"));
-  if (Object.keys(summary.errors).length > 0) {
-    console.log("errors:");
-    for (const [category, detail] of Object.entries(summary.errors)) {
-      console.log(
-        "  " +
-          category +
-          ": stage=" +
-          (detail.stage ?? "unknown") +
-          " errcode=" +
-          String(detail.errcode ?? "-") +
-          " errmsg=" +
-          (detail.errmsg ?? "unknown"),
-      );
-    }
-  }
-  if (stderr) {
+  console.log(
+    "error: stage=" +
+      (call.stage ?? "unknown") +
+      " errcode=" +
+      String(call.errcode ?? "-") +
+      " errmsg=" +
+      (call.errmsg ?? "unknown"),
+  );
+  if (result.stderr) {
     console.log("remote_stderr:");
-    console.log(stderr);
+    console.log(result.stderr);
   }
 }
 
@@ -819,14 +824,12 @@ function printUsage() {
   console.error(
     [
       "Usage:",
-      "  node scripts/wecom-mcp-remote-probe.js",
-      "  node scripts/wecom-mcp-remote-probe.js --categories=doc,contact,msg",
-      "  node scripts/wecom-mcp-remote-probe.js --account=default --json",
+      "  node scripts/wecom-mcp-remote-call.js --category=msg --method=get_msg_chat_list --args='{\"begin_time\":\"2026-03-17 00:00:00\",\"end_time\":\"2026-03-20 23:59:59\"}'",
+      "  node scripts/wecom-mcp-remote-call.js --account=default --category=doc --method=get_doc_content --args='{\"doc_id\":\"...\"}'",
       "",
       "Optional:",
       "  --host=" + DEFAULT_HOST,
       "  --account=<wecom account id>",
-      "  --categories=doc,contact,todo,meeting,schedule,msg",
       "  --pluginVersion=<override plugin_version>",
       "  --protocolVersion=<override MCP protocol version>",
       "  --json",
@@ -836,7 +839,12 @@ function printUsage() {
 
 function main() {
   const options = parseArgs(process.argv.slice(2));
-  const result = runRemoteProbe(options);
+  if (!options.category || !options.method) {
+    printUsage();
+    process.exit(1);
+  }
+
+  const result = runRemoteCall(options);
   if (!result.parsed) {
     throw new Error("ssh returned no JSON output" + (result.stderr ? "\n" + result.stderr : ""));
   }
@@ -844,7 +852,7 @@ function main() {
   if (options.json) {
     console.log(JSON.stringify(result.parsed, null, 2));
   } else {
-    printHumanSummary(summarize(result.parsed, options.host), result.parsed.stderr || result.stderr);
+    printHumanSummary(result, options);
   }
   process.exit(result.status);
 }

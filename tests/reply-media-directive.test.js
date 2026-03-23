@@ -153,6 +153,9 @@ describe("buildReplyMediaGuidance", () => {
     assert.ok(guidance.includes("/workspace/..."));
     assert.ok(guidance.includes('aspect="landscape"'));
     assert.ok(guidance.includes('model_preference="qwen"'));
+    assert.ok(guidance.includes("do NOT repeat those URLs"));
+    assert.ok(guidance.includes("Do NOT embed markdown images"));
+    assert.ok(guidance.includes("图片会单独发送，请查收。"));
   });
 });
 

@@ -1,5 +1,30 @@
 # Changelog
 
+## 2.4.0 (2026-03-23)
+
+相对 [v2.3.0](https://github.com/yangsjt/openclaw-plugin-wecom/releases/tag/v2.3.0) 的变更摘要。
+
+### Features
+
+- **MCP 按需架构重构**: 移除 `mcp-config.js` 持久化模块，改为通过 WS 客户端按需获取 MCP 配置并内存缓存，消除文件系统路径依赖（#132, #141）
+- **MCP `msg` category 支持**: `wecom_mcp` 新增消息类 MCP 调用（群聊/单聊消息查询），配套 `wecom-msg` 和 `wecom-send-media` skill
+- **MCP 企业规模限制说明**: tool description 和错误消息中明确标注企微官方策略——>10 人企业仅支持 `doc` category，<=10 人小团队支持全部 category
+- **回调入站媒体下载兼容**: `downloadCallbackMedia` 改用 `core.media` runtime，兼容新版 OpenClaw 媒体存储接口
+- **image_studio 回复规范**: WS 回复引导中增加 image_studio 成功后不重复输出图片 URL 的约束
+
+### Fixes
+
+- **动态 Agent 配置写入安全检查 (#136)**: `ensureDynamicAgentListed` 写入前验证内存配置含 `channels` 段，防止不完整快照覆盖用户配置文件
+- **`replyFormat: "text"` 全路径生效 (#139)**: `sendViaAgent` 传递 `format` 参数，`sendViaWebhook` 根据配置选择 `webhookSendText` / `webhookSendMarkdown`，个人微信端不再显示"暂不支持此消息类型"
+- **MCP unsupported category 错误增强 (#140)**: 返回企业规模限制说明 + 更明确的停止重试指令，减少 LLM 无效探索
+
+### Chore
+
+- 删除 `wecom/mcp-config.js`、`scripts/wecom-mcp-probe.js`、`tests/mcp-config.test.js`
+- 新增 `scripts/wecom-mcp-remote-call.js` 远程 MCP 调用探测脚本
+- 新增 `tests/callback-media.test.js` 回调媒体下载测试
+- `.gitignore` 增加 `.claude/` 目录
+
 ## 2.3.0 (2026-03-20)
 
 相对 [v2.2.1](https://github.com/sunnoy/openclaw-plugin-wecom/releases/tag/v2.2.1) 的变更摘要。

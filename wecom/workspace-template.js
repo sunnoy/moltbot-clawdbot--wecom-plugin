@@ -327,18 +327,25 @@ export async function ensureDynamicAgentListed(agentId, templateDir, baseAgentId
 
         // Persist to disk so `openclaw agents list` (separate process) can see
         // the dynamic agent and it survives gateway restarts.
-        // Write the mutated in-memory config directly (same pattern as logoutAccount).
-        // NOTE: loadConfig() returns runtimeConfigSnapshot in gateway mode — the same
-        // object we already mutated above — so a read-modify-write pattern silently
-        // skips the write (diskChanged=false). Writing directly avoids this.
-        try {
-          await configRuntime.writeConfigFile(openclawConfig);
-          logger.info("WeCom: dynamic agent persisted to config file", { agentId: normalizedId });
-        } catch (writeErr) {
-          logger.warn("WeCom: failed to persist dynamic agent to config file", {
+        // Safety check: refuse to write if critical config sections are missing,
+        // which would indicate the in-memory snapshot is incomplete and writing
+        // it would destroy the user's configuration (#136).
+        const hasChannels = openclawConfig.channels && typeof openclawConfig.channels === "object";
+        if (!hasChannels) {
+          logger.warn("WeCom: skipping config write — in-memory config is missing 'channels' section", {
             agentId: normalizedId,
-            error: writeErr?.message || String(writeErr),
+            keys: Object.keys(openclawConfig),
           });
+        } else {
+          try {
+            await configRuntime.writeConfigFile(openclawConfig);
+            logger.info("WeCom: dynamic agent persisted to config file", { agentId: normalizedId });
+          } catch (writeErr) {
+            logger.warn("WeCom: failed to persist dynamic agent to config file", {
+              agentId: normalizedId,
+              error: writeErr?.message || String(writeErr),
+            });
+          }
         }
       }
       

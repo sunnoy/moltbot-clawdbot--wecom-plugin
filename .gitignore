@@ -26,3 +26,6 @@ welcome-messages.json
 test.sh
 AGENTS.md
 plans/
+
+# Upstream @wecom/wecom-openclaw-plugin npm tarball extract (reference only)
+upstream/wecom-openclaw-plugin-1.0.13/

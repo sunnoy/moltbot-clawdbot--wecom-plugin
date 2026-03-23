@@ -12,6 +12,12 @@ import { getAccessToken } from "./agent-api.js";
 import { wecomFetch } from "./http.js";
 import { AGENT_API_ENDPOINTS, CALLBACK_MEDIA_DOWNLOAD_TIMEOUT_MS } from "./constants.js";
 
+function resolveManagedCallbackMediaDir() {
+  const override = process.env.OPENCLAW_STATE_DIR?.trim() || process.env.CLAWDBOT_STATE_DIR?.trim();
+  const stateDir = override || path.join(process.env.HOME || "/tmp", ".openclaw");
+  return path.join(stateDir, "media", "wecom");
+}
+
 /**
  * Download a WeCom media file (image / voice / file) by MediaId via the
  * self-built app access token and save it through the core media runtime.
@@ -20,11 +26,11 @@ import { AGENT_API_ENDPOINTS, CALLBACK_MEDIA_DOWNLOAD_TIMEOUT_MS } from "./const
  * @param {object} params.agent   - { corpId, corpSecret, agentId }
  * @param {string} params.mediaId - WeCom MediaId
  * @param {"image"|"voice"|"file"} params.type - media type hint
- * @param {object} params.runtime - OpenClaw runtime (for saveMediaBuffer)
+ * @param {object} [params.mediaRuntime] - OpenClaw media runtime (for saveMediaBuffer)
  * @param {object} params.config  - OpenClaw config (for mediaMaxMb)
  * @returns {Promise<{ path: string, contentType: string }>}
  */
-export async function downloadCallbackMedia({ agent, mediaId, type, runtime, config }) {
+export async function downloadCallbackMedia({ agent, mediaId, type, mediaRuntime, config }) {
   const token = await getAccessToken(agent);
   const url = `${AGENT_API_ENDPOINTS.DOWNLOAD_MEDIA}?access_token=${encodeURIComponent(token)}&media_id=${encodeURIComponent(mediaId)}`;
 
@@ -57,20 +63,22 @@ export async function downloadCallbackMedia({ agent, mediaId, type, runtime, con
     (type === "image" ? `${mediaId}.jpg` : type === "voice" ? `${mediaId}.amr` : mediaId);
 
   // Save via core media runtime when available
-  if (typeof runtime?.media?.saveMediaBuffer === "function") {
-    const saved = await runtime.media.saveMediaBuffer(buffer, contentType, "inbound", maxBytes, filename);
+  if (typeof mediaRuntime?.saveMediaBuffer === "function") {
+    const saved = await mediaRuntime.saveMediaBuffer(buffer, contentType, "inbound", maxBytes, filename);
     return { path: saved.path, contentType: saved.contentType };
   }
 
-  // Fallback: write to OS temp dir
-  const { tmpdir } = await import("node:os");
-  const { writeFile } = await import("node:fs/promises");
+  // Fallback: keep callback media under the managed OpenClaw media root so
+  // stageSandboxMedia can safely copy it into the agent sandbox later.
+  const { mkdir, writeFile } = await import("node:fs/promises");
   const ext = path.extname(filename) || (type === "image" ? ".jpg" : ".bin");
+  const mediaDir = resolveManagedCallbackMediaDir();
   const tempPath = path.join(
-    tmpdir(),
+    mediaDir,
     `wecom-cb-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`,
   );
+  await mkdir(mediaDir, { recursive: true, mode: 0o700 });
   await writeFile(tempPath, buffer);
-  logger.debug(`[CB] Media saved to temp path: ${tempPath}`);
+  logger.debug(`[CB] Media saved to managed path: ${tempPath}`);
   return { path: tempPath, contentType };
 }

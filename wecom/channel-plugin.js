@@ -24,7 +24,7 @@ import { wecomOnboardingAdapter } from "./onboarding.js";
 import { getAccountTelemetry, recordOutboundActivity } from "./runtime-telemetry.js";
 import { getOpenclawConfig, getRuntime, setOpenclawConfig } from "./state.js";
 import { resolveWecomTarget } from "./target.js";
-import { webhookSendFile, webhookSendImage, webhookSendMarkdown, webhookUploadFile } from "./webhook-bot.js";
+import { webhookSendFile, webhookSendImage, webhookSendMarkdown, webhookSendText, webhookUploadFile } from "./webhook-bot.js";
 import { loadOutboundMediaFromUrl as loadOutboundMediaFromUrlCompat } from "./openclaw-compat.js";
 import {
   CHANNEL_ID,
@@ -142,7 +142,7 @@ function applyNetworkConfig(cfg, accountId) {
   return account;
 }
 
-async function sendViaWebhook({ cfg, accountId, webhookName, text, mediaUrl, preparedMedia }) {
+async function sendViaWebhook({ cfg, accountId, webhookName, text, mediaUrl, preparedMedia, replyFormat }) {
   const account = resolveAccount(cfg, accountId);
   const raw = account?.config?.webhooks?.[webhookName];
   const url = raw ? (String(raw).startsWith("http") ? String(raw) : `${getWebhookBotSendUrl()}?key=${raw}`) : null;
@@ -150,8 +150,13 @@ async function sendViaWebhook({ cfg, accountId, webhookName, text, mediaUrl, pre
     throw new Error(`unknown webhook target: ${webhookName}`);
   }
 
+  const effectiveFormat = replyFormat || account?.agentReplyFormat || "markdown";
+  const sendWebhookText = effectiveFormat === "text"
+    ? (opts) => webhookSendText(opts)
+    : (opts) => webhookSendMarkdown(opts);
+
   if (!mediaUrl) {
-    await webhookSendMarkdown({ url, content: text });
+    await sendWebhookText({ url, content: text });
     recordOutboundActivity({ accountId });
     return { channel: CHANNEL_ID, messageId: `wecom-webhook-${Date.now()}` };
   }
@@ -160,7 +165,7 @@ async function sendViaWebhook({ cfg, accountId, webhookName, text, mediaUrl, pre
     preparedMedia ?? (await loadResolvedMedia(mediaUrl, { accountConfig: account?.config }));
 
   if (text) {
-    await webhookSendMarkdown({ url, content: text });
+    await sendWebhookText({ url, content: text });
   }
 
   if (mediaType === "image") {
@@ -178,15 +183,17 @@ async function sendViaWebhook({ cfg, accountId, webhookName, text, mediaUrl, pre
   return { channel: CHANNEL_ID, messageId: `wecom-webhook-${Date.now()}` };
 }
 
-async function sendViaAgent({ cfg, accountId, target, text, mediaUrl, preparedMedia }) {
-  const agent = resolveAccount(cfg, accountId)?.agentCredentials;
+async function sendViaAgent({ cfg, accountId, target, text, mediaUrl, preparedMedia, replyFormat }) {
+  const account = resolveAccount(cfg, accountId);
+  const agent = account?.agentCredentials;
   if (!agent) {
     throw new Error("Agent API is not configured for this account");
   }
 
+  const effectiveFormat = replyFormat || account?.agentReplyFormat || "markdown";
   if (text) {
     for (const chunk of splitTextByByteLimit(text)) {
-      await agentSendText({ agent, ...target, text: chunk });
+      await agentSendText({ agent, ...target, text: chunk, format: effectiveFormat });
     }
   }
 

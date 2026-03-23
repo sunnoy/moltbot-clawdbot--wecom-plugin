@@ -85,9 +85,15 @@ function normalizeUnsupportedBizTypePayload(payload, category) {
     details:
       rawMessage ||
       `unsupported mcp biz type for category "${category}"`,
+    note:
+      category !== "doc"
+        ? `Per WeCom official policy, enterprises with >10 people only have access to the "doc" category. ` +
+          `Categories like contact, todo, meeting, schedule, msg are only available for small teams (<=10 people).`
+        : undefined,
     next_action:
       `Stop retrying category "${category}" with alternate read/list/find paths. ` +
-      `Ask an administrator to enable the "${category}" MCP category for this bot.`,
+      `Do NOT attempt other categories as a workaround. ` +
+      `Inform the user that the "${category}" MCP category is not available for their current bot/enterprise.`,
   };
 }
 
@@ -596,13 +602,22 @@ export function createWeComMcpTool() {
     label: "WeCom MCP Tool",
     description: [
       "Calls WeCom MCP servers over Streamable HTTP.",
+      "Common official categories: doc, contact, todo, meeting, schedule, msg.",
+      "",
+      "Category availability depends on enterprise size (WeCom official policy):",
+      "  - Small teams (<=10 people): all categories (doc, contact, todo, meeting, schedule, msg)",
+      "  - Enterprises (>10 people): doc only (documents & smart sheets)",
+      "If a category returns errcode 846609 / 'unsupported mcp biz type', it is NOT enabled for the current bot — stop retrying immediately.",
+      "",
       "Supported actions:",
       "  - list: list tools under a category",
       "  - call: call one tool under a category",
       "",
       "Examples:",
       "  wecom_mcp list contact",
+      "  wecom_mcp list msg",
       "  wecom_mcp call schedule create_schedule '{\"schedule\": {...}}'",
+      "  wecom_mcp call msg get_messages '{\"chat_type\": 2, \"chatid\": \"GROUP_ID\", \"begin_time\": \"2026-03-17 00:00:00\", \"end_time\": \"2026-03-20 23:59:59\"}'",
     ].join("\n"),
     parameters: {
       type: "object",
@@ -614,7 +629,8 @@ export function createWeComMcpTool() {
         },
         category: {
           type: "string",
-          description: "WeCom MCP category, such as doc, contact, schedule, todo, meeting.",
+          description:
+            "WeCom MCP category, such as doc, contact, todo, meeting, schedule, or msg. Actual availability depends on the current bot/runtime.",
         },
         method: {
           type: "string",

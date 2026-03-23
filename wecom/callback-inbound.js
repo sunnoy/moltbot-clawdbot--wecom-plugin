@@ -300,7 +300,7 @@ async function processCallbackMessage({ parsedMsg, account, config, runtime }) {
         agent: account.agentCredentials,
         mediaId,
         type: mediaType === "image" ? "image" : mediaType === "voice" ? "voice" : "file",
-        runtime,
+        mediaRuntime: core.media ?? runtime?.media,
         config,
       });
       mediaList.push(downloaded);
