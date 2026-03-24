@@ -1,6 +1,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { resolveWecomTarget } from "../wecom/target.js";
+import { mkdtemp, mkdir } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 describe("resolveWecomTarget", () => {
   it("parses explicit group targets", () => {
@@ -56,5 +59,30 @@ describe("resolveWecomTarget", () => {
 
   it("explicit party: prefix still works for long digit strings", () => {
     assert.deepEqual(resolveWecomTarget("party:13800001111"), { toParty: "13800001111" });
+  });
+
+  it("transliterates plain Chinese names into user IDs", () => {
+    assert.deepEqual(resolveWecomTarget("韦元栋"), { toUser: "weiyuandong" });
+    assert.deepEqual(resolveWecomTarget("王杰"), { toUser: "wangjie" });
+  });
+
+  it("ignores whitespace and middle dots when transliterating Chinese names", () => {
+    assert.deepEqual(resolveWecomTarget(" 韦 元栋 "), { toUser: "weiyuandong" });
+    assert.deepEqual(resolveWecomTarget("阿·古达木"), { toUser: "agudamu" });
+  });
+
+  it("does not transliterate explicit user: targets", () => {
+    assert.deepEqual(resolveWecomTarget("user:韦元栋"), { toUser: "韦元栋" });
+  });
+
+  it("matches partial Chinese-name pinyin against known dynamic dm agents", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "wecom-target-"));
+    process.env.OPENCLAW_STATE_DIR = stateDir;
+    await mkdir(path.join(stateDir, "agents", "wecom-dm-weiyuandong"), { recursive: true });
+
+    assert.deepEqual(resolveWecomTarget("元栋"), { toUser: "weiyuandong" });
+    assert.deepEqual(resolveWecomTarget("yuandong"), { toUser: "weiyuandong" });
+
+    delete process.env.OPENCLAW_STATE_DIR;
   });
 });

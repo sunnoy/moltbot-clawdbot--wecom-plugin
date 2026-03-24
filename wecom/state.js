@@ -5,6 +5,7 @@ import { resolveAgentConfigForAccount, resolveDefaultAccountId, resolveAccount }
 const runtimeState = {
   runtime: null,
   openclawConfig: null,
+  channelRuntime: null,
   ensuredDynamicAgentIds: new Set(),
   ensureDynamicAgentWriteQueue: Promise.resolve(),
 };
@@ -21,6 +22,14 @@ export function getRuntime() {
     throw new Error("[wecom] Runtime not initialized");
   }
   return runtimeState.runtime;
+}
+
+export function setChannelRuntime(channelRuntime) {
+  runtimeState.channelRuntime = channelRuntime;
+}
+
+export function getChannelRuntime() {
+  return runtimeState.channelRuntime;
 }
 
 export function setOpenclawConfig(config) {
@@ -77,6 +86,7 @@ export function resolveWebhookUrl(name, accountId) {
 export function resetStateForTesting() {
   runtimeState.runtime = null;
   runtimeState.openclawConfig = null;
+  runtimeState.channelRuntime = null;
   runtimeState.ensuredDynamicAgentIds = new Set();
   runtimeState.ensureDynamicAgentWriteQueue = Promise.resolve();
   dispatchLocks.clear();

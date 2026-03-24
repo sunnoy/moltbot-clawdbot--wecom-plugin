@@ -69,7 +69,7 @@
 
 ## 前置要求
 
-- 已安装 [OpenClaw](https://github.com/openclaw/openclaw) `2026.3.2+`
+- 已安装 [OpenClaw](https://github.com/openclaw/openclaw) `2026.3.23-2+`
 - 企业微信管理后台权限，可创建 AI 机器人或自建应用
 - **机器人已切换到长连接模式**（参考[官方文档](https://open.work.weixin.qq.com/help2/pc/cat?doc_id=21657)）
 - 运行 OpenClaw 的机器可以出站访问：
@@ -83,6 +83,8 @@ Bot 主链路不需要企业微信反向访问你的 HTTP 回调地址。
 ```bash
 openclaw plugins install @sunnoy/wecom
 ```
+
+> **3.0 兼容性说明：** 从 `3.0.0` 开始，本插件仅支持 OpenClaw `2026.3.23-2+`。旧版 OpenClaw 请继续使用 `2.x`。
 
 > **从官方插件迁移：** 如果之前使用 `openclaw plugins install @wecom/wecom-openclaw-plugin`，请先卸载官方插件再安装本插件。`channels.wecom` 配置字段兼容，无需修改。
 
@@ -524,6 +526,10 @@ Webhook 只负责群通知。
 ### Q: 2.0 和之前最大的区别是什么？
 
 2.0 完全采用 WebSocket 长连接，不再使用 HTTP 回调。需要在企业微信后台将机器人切换到[长连接模式](https://open.work.weixin.qq.com/help2/pc/cat?doc_id=21657)。
+
+### Q: 3.0 为什么不能再装在旧 OpenClaw 上？
+
+3.0 开始直接适配 OpenClaw `2026.3.23-2+` 的新版 plugin SDK 导出和媒体/runtime 约定，旧版 core 缺少这些接口。旧环境请固定使用 `2.x`。
 
 ### Q: 之前用的官方插件 `@wecom/wecom-openclaw-plugin`，怎么迁移？
 

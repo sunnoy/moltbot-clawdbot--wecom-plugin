@@ -34,7 +34,6 @@ describe("openclaw media compat", () => {
     });
 
     assert.ok(roots.includes(path.join(stateDir, "media")));
-    assert.ok(roots.includes(path.join(stateDir, "agents")));
     assert.ok(roots.includes(path.join(stateDir, "workspace")));
     assert.ok(roots.includes(path.join(stateDir, "sandboxes")));
     // stateDir itself should NOT be in roots (only its subdirectories) to prevent path traversal

@@ -7,6 +7,88 @@
  * Supports explicit prefixes (party:, tag:, etc.) and heuristic fallback.
  */
 
+import { readdirSync } from "node:fs";
+import { pinyin } from "pinyin-pro";
+import { resolveStateDir } from "./openclaw-compat.js";
+
+let knownUserIdsCache = {
+  loadedAt: 0,
+  stateDir: "",
+  userIds: [],
+};
+
+function getKnownWecomUserIds() {
+  const now = Date.now();
+  const stateDir = resolveStateDir();
+  if (knownUserIdsCache.stateDir === stateDir && now - knownUserIdsCache.loadedAt < 5_000) {
+    return knownUserIdsCache.userIds;
+  }
+
+  try {
+    const agentDirs = readdirSync(`${stateDir}/agents`, { withFileTypes: true });
+    const userIds = [];
+    for (const entry of agentDirs) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+      const match = entry.name.match(/^wecom-(?:(.+?)-)?dm-(.+)$/);
+      if (match?.[2]) {
+        userIds.push(match[2].toLowerCase());
+      }
+    }
+    knownUserIdsCache = {
+      loadedAt: now,
+      stateDir,
+      userIds: [...new Set(userIds)],
+    };
+  } catch {
+    knownUserIdsCache = {
+      loadedAt: now,
+      stateDir,
+      userIds: [],
+    };
+  }
+
+  return knownUserIdsCache.userIds;
+}
+
+function transliterateChineseNameToUserId(value) {
+  const collapsed = String(value ?? "").replace(/[\s·•・]/g, "");
+  if (!collapsed || !/^\p{Script=Han}+$/u.test(collapsed)) {
+    return "";
+  }
+
+  return pinyin(collapsed, { toneType: "none", type: "array" }).join("").toLowerCase();
+}
+
+function resolveKnownWecomUserId(value) {
+  const needle = String(value ?? "").trim().toLowerCase();
+  if (!needle) {
+    return "";
+  }
+
+  const candidates = getKnownWecomUserIds();
+  if (candidates.length === 0) {
+    return "";
+  }
+
+  if (candidates.includes(needle)) {
+    return needle;
+  }
+
+  const suffixMatches = candidates.filter((candidate) => candidate.endsWith(needle));
+  if (suffixMatches.length === 1) {
+    return suffixMatches[0];
+  }
+
+  const containsMatches = candidates.filter((candidate) => candidate.includes(needle));
+  if (containsMatches.length === 1) {
+    return containsMatches[0];
+  }
+
+  return "";
+}
+
 /**
  * @param {string|undefined} raw
  * @returns {{ webhook?: string, toUser?: string, toParty?: string, toTag?: string, chatId?: string } | undefined}
@@ -53,6 +135,11 @@ export function resolveWecomTarget(raw) {
     return { toParty: clean };
   }
 
+  const pinyinUserId = transliterateChineseNameToUserId(clean);
+  if (pinyinUserId) {
+    return { toUser: resolveKnownWecomUserId(pinyinUserId) || pinyinUserId };
+  }
+
   // Default: treat as user ID.
-  return { toUser: clean };
+  return { toUser: resolveKnownWecomUserId(clean) || clean };
 }

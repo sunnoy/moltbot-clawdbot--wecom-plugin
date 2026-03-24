@@ -65,7 +65,6 @@ export function clearTemplateMtimeCache({ agentSeedCache = true } = {}) {
 export function resolveAgentWorkspaceDirLocal(agentId) {
   const stateDir =
     process.env.OPENCLAW_STATE_DIR?.trim() ||
-    process.env.CLAWDBOT_STATE_DIR?.trim() ||
     join(process.env.HOME || "/root", ".openclaw");
   return join(stateDir, `workspace-${agentId}`);
 }

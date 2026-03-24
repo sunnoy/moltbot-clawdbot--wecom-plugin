@@ -13,7 +13,7 @@ import { wecomFetch } from "./http.js";
 import { AGENT_API_ENDPOINTS, CALLBACK_MEDIA_DOWNLOAD_TIMEOUT_MS } from "./constants.js";
 
 function resolveManagedCallbackMediaDir() {
-  const override = process.env.OPENCLAW_STATE_DIR?.trim() || process.env.CLAWDBOT_STATE_DIR?.trim();
+  const override = process.env.OPENCLAW_STATE_DIR?.trim();
   const stateDir = override || path.join(process.env.HOME || "/tmp", ".openclaw");
   return path.join(stateDir, "media", "wecom");
 }

@@ -1,6 +1,6 @@
 {
     "name": "@sunnoy/wecom",
-    "version": "2.4.1",
+    "version": "3.0.0",
     "description": "Enterprise WeChat AI Bot channel plugin for OpenClaw",
     "type": "module",
     "main": "index.js",
@@ -18,7 +18,7 @@
         "openclaw.plugin.json"
     ],
     "peerDependencies": {
-        "openclaw": "*"
+        "openclaw": "^2026.3.23-2"
     },
     "optionalDependencies": {
         "undici": "^7.0.0"
@@ -60,6 +60,7 @@
     "license": "ISC",
     "dependencies": {
         "@wecom/aibot-node-sdk": "^1.0.3",
-        "file-type": "^21.3.0"
+        "file-type": "^21.3.0",
+        "pinyin-pro": "^3.28.0"
     }
 }

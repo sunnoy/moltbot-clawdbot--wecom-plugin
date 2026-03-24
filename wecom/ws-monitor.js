@@ -7,6 +7,7 @@ import { WSClient, generateReqId } from "@wecom/aibot-node-sdk";
 import { uploadAndSendMedia, buildMediaErrorSummary } from "./media-uploader.js";
 import { createPersistentReqIdStore } from "./reqid-store.js";
 import { agentSendMedia, agentSendText, agentUploadMedia } from "./agent-api.js";
+import { applyOutboundSenderProtocol, resolveOutboundSenderLabel } from "./outbound-sender-protocol.js";
 import { logger } from "../logger.js";
 import { normalizeThinkingTags } from "../think-parser.js";
 import { MessageDeduplicator } from "../utils.js";
@@ -309,7 +310,7 @@ function resolveUserPath(value) {
 }
 
 function resolveStateDir() {
-  const override = process.env.OPENCLAW_STATE_DIR?.trim() || process.env.CLAWDBOT_STATE_DIR?.trim();
+  const override = process.env.OPENCLAW_STATE_DIR?.trim();
   if (override) {
     return resolveUserPath(override);
   }
@@ -418,6 +419,7 @@ function buildReplyMediaGuidance(config, agentId) {
   const browserMediaDir = path.join(resolveStateDir(), "media", "browser");
   const configuredRoots = resolveConfiguredReplyMediaLocalRoots(config);
   const qwenImageToolsConfig = config?.plugins?.entries?.wecom?.config?.qwenImageTools;
+  const senderLabel = resolveOutboundSenderLabel(agentId);
   const guidance = [
     WECOM_REPLY_MEDIA_GUIDANCE_HEADER,
     `Local reply files are allowed only under the current workspace: ${workspaceDir}`,
@@ -432,6 +434,10 @@ function buildReplyMediaGuidance(config, agentId) {
     "CRITICAL: If a tool already returned a path prefixed with FILE: (e.g. FILE:/abs/path.pdf), keep the FILE: prefix exactly as-is. Do NOT change it to MEDIA:.",
     "Each directive MUST be on its own line with no other text on that line.",
     "The plugin will automatically send the media to the user.",
+    "[WeCom cross-chat send rule]",
+    `If you proactively send a WeCom message to a different user/group via message.send, prepend this exact hidden header on the first line: [[sender:${senderLabel}]]`,
+    `Example cross-chat content: [[sender:${senderLabel}]]\\n你好`,
+    "Use the sender header only for proactive cross-chat sends. Do NOT add it when replying in the current WeCom chat.",
   ];
 
   if (configuredRoots.length > 0) {
@@ -455,6 +461,13 @@ function buildReplyMediaGuidance(config, agentId) {
   }
 
   guidance.push("Never reference any other host path.");
+
+  guidance.push(
+    "[WeCom visible text rule]",
+    "ALL text you want the user to see MUST be wrapped in <final> tags — this includes short status messages before tool calls (e.g. <final>正在查询，稍等～</final>).",
+    "Text outside <final> tags is silently discarded and never delivered to the WeCom chat.",
+  );
+
   return guidance.join("\n");
 }
 
@@ -498,9 +511,38 @@ function normalizeReplyMediaUrlForLoad(mediaUrl, config, agentId) {
 }
 
 function buildBodyForAgent(body, config, agentId) {
-  // Guidance is now injected via before_prompt_build hook into system prompt.
-  // Keep buildBodyForAgent as a plain passthrough for the user message body.
-  return typeof body === "string" && body.length > 0 ? body : "";
+  if (typeof body !== "string" || body.length === 0) {
+    return "";
+  }
+
+  const senderLabel = resolveOutboundSenderLabel(agentId);
+  const inlineRules = [
+    "[WeCom agent rules]",
+    "If proactively sending to a different WeCom user/group via message.send, prepend this exact hidden header on the first line:",
+    `[[sender:${senderLabel}]]`,
+    `Example: [[sender:${senderLabel}]]\\n你好`,
+    "Do NOT add that header when replying in the current WeCom chat.",
+    "To send files back to the current WeCom chat, do NOT use message.send or message.sendAttachment; emit MEDIA:/... or FILE:/... directives on their own lines instead.",
+  ].join("\n");
+
+  return `${inlineRules}\n\n${body}`;
+}
+
+function shouldUseMarkdownForActiveSend(content) {
+  const text = String(content ?? "").trim();
+  if (!text) {
+    return true;
+  }
+
+  return true;
+}
+
+function buildWsActiveSendBody(content) {
+  const text = String(content ?? "");
+  return {
+    msgtype: "markdown",
+    markdown: { content: text },
+  };
 }
 
 function splitReplyMediaFromText(text) {
@@ -868,6 +910,7 @@ function resolveOutboundChatId(to) {
 export async function sendWsMessage({ to, content, accountId = "default" }) {
   const chatId = resolveOutboundChatId(to);
   const wsClient = getWsClient(accountId);
+  const outbound = applyOutboundSenderProtocol(content);
 
   if (!chatId) {
     throw new Error("Missing chat target for WeCom WS send");
@@ -888,10 +931,7 @@ export async function sendWsMessage({ to, content, accountId = "default" }) {
     });
   }
 
-  const result = await wsClient.sendMessage(chatId, {
-    msgtype: "markdown",
-    markdown: { content },
-  });
+  const result = await wsClient.sendMessage(chatId, buildWsActiveSendBody(outbound.content));
 
   recordActiveSend({ accountId, chatId });
 
@@ -2062,6 +2102,8 @@ export const wsMonitorTesting = {
   parseMessageContent,
   splitReplyMediaFromText,
   buildBodyForAgent,
+  buildWsActiveSendBody,
+  resolveOutboundSenderLabel,
   normalizeReplyMediaUrlForLoad,
   flushPendingRepliesViaAgentApi,
   stripThinkTags,

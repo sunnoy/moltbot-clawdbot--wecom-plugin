@@ -1,4 +1,4 @@
-import { addWildcardAllowFrom } from "openclaw/plugin-sdk";
+import { addWildcardAllowFrom } from "openclaw/plugin-sdk/setup";
 import { DEFAULT_WS_URL, DEFAULT_ACCOUNT_ID } from "./constants.js";
 import { resolveAccount, updateAccountConfig } from "./accounts.js";
 

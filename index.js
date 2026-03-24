@@ -1,5 +1,10 @@
 import { logger } from "./logger.js";
-import { wecomChannelPlugin } from "./wecom/channel-plugin.js";
+import {
+  wecomChannelPlugin,
+  handleSubagentDeliveryTarget,
+  handleSubagentSpawned,
+  handleSubagentEnded,
+} from "./wecom/channel-plugin.js";
 import { createWeComMcpTool } from "./wecom/mcp-tool.js";
 import { createImageStudioTool } from "./wecom/image-studio-tool.js";
 import { resolveQwenImageToolsConfig, wecomPluginConfigSchema } from "./wecom/plugin-config.js";
@@ -7,6 +12,7 @@ import { setOpenclawConfig, setRuntime } from "./wecom/state.js";
 import { buildReplyMediaGuidance } from "./wecom/ws-monitor.js";
 import { listAccountIds, resolveAccount } from "./wecom/accounts.js";
 import { createCallbackHandler } from "./wecom/callback-inbound.js";
+import { prepareWecomMessageToolParams } from "./wecom/outbound-sender-protocol.js";
 
 const plugin = {
   id: "wecom",
@@ -48,6 +54,21 @@ const plugin = {
       }
       const guidance = buildReplyMediaGuidance(api.config, ctx.agentId);
       return { appendSystemContext: guidance };
+    });
+
+    api.on("subagent_delivery_target", handleSubagentDeliveryTarget);
+    api.on("subagent_spawned", handleSubagentSpawned);
+    api.on("subagent_ended", handleSubagentEnded);
+
+    api.on("before_tool_call", (event, ctx) => {
+      if (event.toolName !== "message") {
+        return;
+      }
+      const params = prepareWecomMessageToolParams(event.params, ctx.agentId);
+      if (params === event.params) {
+        return;
+      }
+      return { params };
     });
   },
 };

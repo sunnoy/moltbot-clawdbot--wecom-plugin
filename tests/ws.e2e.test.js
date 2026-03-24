@@ -724,7 +724,8 @@ describe("WS e2e", () => {
       replyPayloadFactory: (ctx) => {
         assert.equal(ctx.RawBody, "把 PDF 发我");
         assert.equal(ctx.CommandBody, "把 PDF 发我");
-        assert.equal(ctx.BodyForAgent, "把 PDF 发我");
+        assert.ok(ctx.BodyForAgent.includes("[WeCom agent rules]"));
+        assert.ok(ctx.BodyForAgent.endsWith("把 PDF 发我"));
         return {
           text: `附件如下\nFILE:${replyPdfPath}`,
         };
@@ -855,7 +856,7 @@ describe("WS e2e", () => {
   });
 
   it("rejects passive reply files from unrelated paths under the state directory", async () => {
-    const outsidePdfPath = path.join(tempDir, "agents", "other", "report.pdf");
+    const outsidePdfPath = path.join(tempDir, "private", "other", "report.pdf");
     await mkdir(path.dirname(outsidePdfPath), { recursive: true });
     await writeFile(outsidePdfPath, Buffer.from("reply-pdf"));
 
@@ -1343,6 +1344,50 @@ describe("WS e2e", () => {
     assert.deepEqual(wsClient.sendMessageCalls[0].body, {
       msgtype: "markdown",
       markdown: { content: "主动消息" },
+    });
+  });
+
+  it("applies sender protocol on outbound sendText over WS", async () => {
+    const wsClient = new FakeWsClient();
+    wsClient.isConnected = true;
+    setWsClient("default", wsClient);
+
+    const cfg = createWecomConfig();
+    setOpenclawConfig(cfg);
+
+    await wecomChannelPlugin.outbound.sendText({
+      cfg,
+      to: "wecom:weiyuandong",
+      text: "[[sender:lirui]]\n你好",
+      accountId: "default",
+    });
+
+    assert.equal(wsClient.sendMessageCalls.length, 1);
+    assert.deepEqual(wsClient.sendMessageCalls[0].body, {
+      msgtype: "markdown",
+      markdown: { content: "【sender:lirui】你好" },
+    });
+  });
+
+  it("uses markdown payloads for structured outbound WS messages", async () => {
+    const wsClient = new FakeWsClient();
+    wsClient.isConnected = true;
+    setWsClient("default", wsClient);
+
+    const cfg = createWecomConfig();
+    setOpenclawConfig(cfg);
+
+    await wecomChannelPlugin.outbound.sendText({
+      cfg,
+      to: "wecom:lirui",
+      text: "## 标题\n- 第一项",
+      accountId: "default",
+    });
+
+    assert.equal(wsClient.sendMessageCalls.length, 1);
+    assert.deepEqual(wsClient.sendMessageCalls[0].body, {
+      msgtype: "markdown",
+      markdown: { content: "## 标题\n- 第一项" },
     });
   });
 

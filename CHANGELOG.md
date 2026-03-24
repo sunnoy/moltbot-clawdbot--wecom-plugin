@@ -1,5 +1,31 @@
 # Changelog
 
+## 3.0.0 (2026-03-24)
+
+相对 [v2.4.1](https://github.com/sunnoy/openclaw-plugin-wecom/releases/tag/v2.4.1) 的变更摘要。
+
+### Breaking Changes
+
+- **仅支持 OpenClaw `2026.3.23-2+`**: `peerDependencies.openclaw` 收紧为 `^2026.3.23-2`，并切换到新版 SDK 导出路径（`plugin-sdk/status-helpers`、`plugin-sdk/core`、`plugin-sdk/media-runtime`）
+- **不再兼容旧版 core 媒体/状态目录分支**: 移除旧 `plugin-sdk` 媒体加载 fallback 和 `CLAWDBOT_STATE_DIR` 兼容读取，运行环境统一按新版 OpenClaw 约定处理
+
+### Features
+
+- **跨会话 WeCom 主动消息 sender 协议**: 为 `message.send` / `message.sendAttachment` 注入 `[[sender:...]]` 隐式头，并在 WS、Webhook、Agent API 出站时转成可见发送人前缀，避免子 Agent 主动触达其他会话时丢失发送者身份
+- **中文名目标寻址增强**: `resolveWecomTarget()` 支持将纯中文姓名转拼音 userId，并结合 `~/.openclaw/agents` 下已存在的动态 DM Agent 自动补全或纠正目标 userId
+- **动态 Agent 子会话投递钩子接入新版事件系统**: `subagent_delivery_target` / `subagent_spawned` / `subagent_ended` 改为通过 `api.on(...)` 注册，兼容新版 OpenClaw 生命周期
+
+### Fixes
+
+- **WS 主动发送统一走 Markdown 载荷**: `sendWsMessage()` 统一发送 markdown body，减少结构化文本在主动消息中的降级
+- **账号启动保存 channel runtime**: `startAccount()` 显式缓存 `ctx.channelRuntime`，为新版 core 的 channel 运行时能力留出兼容入口
+- **新版状态摘要工具适配**: 账户状态摘要 helper 改从新版 SDK 子路径导入，避免 `2026.3.23-2` 上的运行时导出不匹配
+
+### Tests
+
+- 新增 `tests/outbound-sender-hook.test.js`、`tests/outbound-sender-protocol.test.js` 覆盖 sender 协议 hook 与协议转换
+- 扩展 `tests/target.test.js`、`tests/reply-media-directive.test.js`、`tests/ws.e2e.test.js`，覆盖中文名寻址、内联 WeCom 规则和 WS 主动发送行为
+
 ## 2.4.0 (2026-03-23)
 
 相对 [v2.3.0](https://github.com/yangsjt/openclaw-plugin-wecom/releases/tag/v2.3.0) 的变更摘要。

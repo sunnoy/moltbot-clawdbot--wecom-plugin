@@ -8,7 +8,13 @@ import {
   resolveReplyMediaLocalRoots,
 } from "../wecom/ws-monitor.js";
 
-const { splitReplyMediaFromText, buildBodyForAgent, normalizeReplyMediaUrlForLoad } = wsMonitorTesting;
+const {
+  splitReplyMediaFromText,
+  buildBodyForAgent,
+  buildWsActiveSendBody,
+  normalizeReplyMediaUrlForLoad,
+} = wsMonitorTesting;
+const { resolveOutboundSenderLabel } = wsMonitorTesting;
 
 describe("splitReplyMediaFromText", () => {
   it("extracts MEDIA: on its own line", () => {
@@ -88,9 +94,12 @@ describe("splitReplyMediaFromText", () => {
 });
 
 describe("buildBodyForAgent", () => {
-  it("returns plain message body without injected guidance", () => {
+  it("prepends inline WeCom rules before the message body", () => {
     const result = buildBodyForAgent("hello world", {}, "test-agent");
-    assert.equal(result, "hello world");
+    assert.ok(result.includes("[WeCom agent rules]"));
+    assert.ok(result.includes("[[sender:test-agent]]"));
+    assert.ok(result.includes("MEDIA:/..."));
+    assert.ok(result.endsWith("hello world"));
   });
 
   it("returns empty string for empty body", () => {
@@ -100,10 +109,27 @@ describe("buildBodyForAgent", () => {
   });
 });
 
+describe("buildWsActiveSendBody", () => {
+  it("uses markdown payloads for simple outbound messages", () => {
+    assert.deepEqual(buildWsActiveSendBody("[lirui] 你好"), {
+      msgtype: "markdown",
+      markdown: { content: "[lirui] 你好" },
+    });
+  });
+
+  it("uses markdown payloads when the content contains markdown structure", () => {
+    assert.deepEqual(buildWsActiveSendBody("## 标题\n- 第一项"), {
+      msgtype: "markdown",
+      markdown: { content: "## 标题\n- 第一项" },
+    });
+  });
+});
+
 describe("buildReplyMediaGuidance", () => {
   it("contains expected guidance sections", () => {
     const guidance = buildReplyMediaGuidance({}, "test-agent");
     assert.ok(guidance.includes("[WeCom reply media rule]"));
+    assert.ok(guidance.includes("[WeCom cross-chat send rule]"));
     assert.ok(guidance.includes("MEDIA:/abs/path"));
     assert.ok(guidance.includes("FILE:/abs/path"));
     assert.ok(guidance.includes("Do NOT call message.send"));
@@ -113,6 +139,7 @@ describe("buildReplyMediaGuidance", () => {
     assert.ok(guidance.includes("SKILL.md"));
     assert.ok(guidance.includes("path prefixed with FILE:"));
     assert.ok(guidance.includes("its own line"));
+    assert.ok(guidance.includes("[[sender:test-agent]]"));
     assert.ok(!guidance.includes("[WeCom image_studio rule]"));
   });
 
@@ -156,6 +183,29 @@ describe("buildReplyMediaGuidance", () => {
     assert.ok(guidance.includes("do NOT repeat those URLs"));
     assert.ok(guidance.includes("Do NOT embed markdown images"));
     assert.ok(guidance.includes("图片会单独发送，请查收。"));
+  });
+
+  it("uses the dm peer id as the sender label in cross-chat guidance", () => {
+    const guidance = buildReplyMediaGuidance({}, "wecom-dm-lirui");
+    assert.ok(guidance.includes("[[sender:lirui]]"));
+    assert.ok(!guidance.includes("[[sender:wecom-dm-lirui]]"));
+  });
+});
+
+describe("resolveOutboundSenderLabel", () => {
+  it("uses dm peer ids for dynamic dm agents", () => {
+    assert.equal(resolveOutboundSenderLabel("wecom-dm-lirui"), "lirui");
+    assert.equal(resolveOutboundSenderLabel("wecom-sales-dm-lirui"), "lirui");
+  });
+
+  it("uses explicit group labels for dynamic group agents", () => {
+    assert.equal(resolveOutboundSenderLabel("wecom-group-wr123"), "group:wr123");
+    assert.equal(resolveOutboundSenderLabel("wecom-sales-group-wr123"), "group:wr123");
+  });
+
+  it("falls back to normalized plain agent ids", () => {
+    assert.equal(resolveOutboundSenderLabel("main"), "main");
+    assert.equal(resolveOutboundSenderLabel(""), "main");
   });
 });
 

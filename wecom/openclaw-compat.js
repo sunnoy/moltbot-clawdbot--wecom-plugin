@@ -3,10 +3,8 @@ import { homedir, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { readFile, realpath, stat } from "node:fs/promises";
 
-const sdkReady = import("openclaw/plugin-sdk")
+const sdkReady = import("openclaw/plugin-sdk/media-runtime")
   .then((sdk) => ({
-    loadOutboundMediaFromUrl:
-      typeof sdk.loadOutboundMediaFromUrl === "function" ? sdk.loadOutboundMediaFromUrl.bind(sdk) : undefined,
     detectMime: typeof sdk.detectMime === "function" ? sdk.detectMime.bind(sdk) : undefined,
     getDefaultMediaLocalRoots:
       typeof sdk.getDefaultMediaLocalRoots === "function" ? sdk.getDefaultMediaLocalRoots.bind(sdk) : undefined,
@@ -82,7 +80,7 @@ function normalizeMediaReference(mediaUrl) {
 }
 
 function resolveStateDir() {
-  const override = process.env.OPENCLAW_STATE_DIR?.trim() || process.env.CLAWDBOT_STATE_DIR?.trim();
+  const override = process.env.OPENCLAW_STATE_DIR?.trim();
   if (override) {
     return resolve(resolveUserPath(override));
   }
@@ -135,6 +133,30 @@ function isLocalMediaAccessError(error) {
 
 function shouldFallbackFromLocalAccessError(error, options) {
   return isLocalMediaAccessError(error) && !hasExplicitMediaRoots(options);
+}
+
+function isPathInsideRoot(filePath, rootPath) {
+  const normalizedRoot = rootPath.endsWith("/") ? rootPath : `${rootPath}/`;
+  return filePath === rootPath || filePath.startsWith(normalizedRoot);
+}
+
+async function assertLocalPathAllowed(filePath, roots) {
+  const canonicalFilePath = await realpath(filePath);
+
+  for (const root of roots) {
+    try {
+      const canonicalRoot = await realpath(root);
+      if (isPathInsideRoot(canonicalFilePath, canonicalRoot)) {
+        return canonicalFilePath;
+      }
+    } catch {
+      if (isPathInsideRoot(canonicalFilePath, root)) {
+        return canonicalFilePath;
+      }
+    }
+  }
+
+  throw new Error(`LocalMediaAccessError: path is not under an allowed directory: ${filePath}`);
 }
 
 async function readLocalMediaFile(filePath, { maxBytes } = {}) {
@@ -251,16 +273,18 @@ export async function loadOutboundMediaFromUrl(mediaUrl, options = {}) {
   const normalized = normalizeMediaReference(mediaUrl);
   const filePath = asLocalPath(normalized);
   const localRoots = await getExtendedMediaLocalRoots(options);
-  const sdk = await sdkReady;
+  const enforceLocalRoots = options.includeDefaultMediaLocalRoots === false || hasExplicitMediaRoots(options);
 
   if (filePath) {
+    const allowedFilePath = enforceLocalRoots ? await assertLocalPathAllowed(filePath, localRoots) : filePath;
+
     if (typeof options.runtimeLoadMedia === "function" && localRoots.length > 0) {
       try {
-        const loaded = await options.runtimeLoadMedia(filePath, { localRoots });
+        const loaded = await options.runtimeLoadMedia(allowedFilePath, { localRoots });
         return {
           buffer: loaded.buffer,
           contentType: loaded.contentType || "",
-          fileName: loaded.fileName || basename(filePath) || "file",
+          fileName: loaded.fileName || basename(allowedFilePath) || "file",
         };
       } catch (error) {
         if (!shouldFallbackFromLocalAccessError(error, options)) {
@@ -269,27 +293,7 @@ export async function loadOutboundMediaFromUrl(mediaUrl, options = {}) {
       }
     }
 
-    if (sdk.loadOutboundMediaFromUrl) {
-      try {
-        return await sdk.loadOutboundMediaFromUrl(filePath, {
-          maxBytes: options.maxBytes,
-          mediaLocalRoots: localRoots,
-        });
-      } catch (error) {
-        if (!shouldFallbackFromLocalAccessError(error, options)) {
-          throw error;
-        }
-      }
-    }
-
-    return readLocalMediaFile(filePath, options);
-  }
-
-  if (sdk.loadOutboundMediaFromUrl && !options.fetchImpl) {
-    return sdk.loadOutboundMediaFromUrl(normalized, {
-      maxBytes: options.maxBytes,
-      mediaLocalRoots: localRoots,
-    });
+    return readLocalMediaFile(allowedFilePath, options);
   }
 
   return fetchRemoteMedia(normalized, options);

@@ -22,7 +22,7 @@ function resolveUserPath(value) {
 }
 
 function resolveOpenclawStateDir() {
-  const override = process.env.OPENCLAW_STATE_DIR?.trim() || process.env.CLAWDBOT_STATE_DIR?.trim();
+  const override = process.env.OPENCLAW_STATE_DIR?.trim();
   if (override) {
     return resolveUserPath(override);
   }
