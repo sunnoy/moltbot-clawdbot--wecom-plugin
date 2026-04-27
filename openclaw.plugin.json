@@ -41,6 +41,15 @@
           "welcomeMessagesFile": {
             "type": "string"
           },
+          "workspaceTemplate": {
+            "type": "string"
+          },
+          "workspaceTemplateExtraFiles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
           "dmPolicy": {
             "enum": [
               "pairing",

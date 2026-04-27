@@ -133,6 +133,7 @@ export const DEFAULT_COMMAND_BLOCK_MESSAGE = `⚠️ 该命令不可用。
 
 export const BOOTSTRAP_FILENAMES = new Set([
   "AGENTS.md",
+  "CLAUDE.md",
   "SOUL.md",
   "TOOLS.md",
   "IDENTITY.md",

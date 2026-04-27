@@ -158,6 +158,7 @@ npm test
         "mentionPatterns": ["@"]
       },
       "workspaceTemplate": "/path/to/template-dir",
+      "workspaceTemplateExtraFiles": ["scripts/", "requirements.txt"],
       "mediaLocalRoots": ["/tmp/openclaw"],
       "agent": {
         "corpId": "wwxxxxxxxxxxxxxxxx",
@@ -188,7 +189,7 @@ npm test
 | `channels.wecom.botId` | string | 是 | 企业微信 AI 机器人 Bot ID |
 | `channels.wecom.secret` | string | 是 | 企业微信 AI 机器人 Secret |
 | `channels.wecom.websocketUrl` | string | 否 | WS 地址，默认 `wss://openws.work.weixin.qq.com` |
-| `channels.wecom.sendThinkingMessage` | boolean | 否 | 是否先发送 `<think></think>` 占位，默认 `true` |
+| `channels.wecom.sendThinkingMessage` | boolean | 否 | 是否先发送 `<think></think>` 占位，默认 `true`。该配置只控制企微思考气泡/占位消息；真实推理内容还要求当前 OpenClaw session 的 `reasoningLevel` 为 `stream` |
 | `channels.wecom.welcomeMessage` | string | 否 | 进入会话欢迎语（非空时固定使用该字符串） |
 | `channels.wecom.welcomeMessagesFile` | string | 否 | 欢迎语列表文件路径。支持：`{ "messages": [ ... ] }` 或顶层数组；每条欢迎语可为**一行一个字符串的数组**（推荐，易读），或单条字符串（可含 `\\n`）。相对路径基于 OpenClaw 状态目录（`~/.openclaw` 或 `OPENCLAW_STATE_DIR`）。未设置 `welcomeMessage` 时从该文件随机选取；**修改文件后无需重启服务**（按 mtime 自动重读） |
 | `channels.wecom.adminUsers` | string[] | 否 | 管理员用户 ID，可绕过命令白名单 |
@@ -217,6 +218,7 @@ npm test
 | `channels.wecom.groupChat.requireMention` | boolean | 否 | 群聊是否要求 @ 才响应，默认 `true` |
 | `channels.wecom.groupChat.mentionPatterns` | string[] | 否 | 群聊触发前缀，默认 `["@"]` |
 | `channels.wecom.workspaceTemplate` | string | 否 | 动态 Agent 工作区模板目录 |
+| `channels.wecom.workspaceTemplateExtraFiles` | string[] | 否 | 在默认模板文件之外额外复制的相对路径文件/目录，例如 `["scripts/", "requirements.txt"]`。会跳过绝对路径、`../`、`.git`、`node_modules`、`.env*` |
 | `channels.wecom.mediaLocalRoots` | string[] | 否 | 额外允许被动回复读取的宿主机目录列表。用于放行 `MEDIA:/abs/path` 或 `FILE:/abs/path` 指向的本地文件；默认只允许当前 Agent workspace 和浏览器产物目录。注意：浏览器工具返回的宿主机路径在 block reply 阶段仍可能被 core sandbox 校验拦下，建议先用 `stage_browser_media` 复制到 `/workspace/...` 后再回复。多账号模式下也可配置在 `channels.wecom.<accountId>.mediaLocalRoots`。修改后需重启 Gateway 生效 |
 
 ### 增强出站配置
@@ -384,6 +386,7 @@ Webhook 只负责群通知。
 - 文本内容支持 Markdown
 - `<thinking>`、`<thought>` 等变体会被规范化为 `<think>`
 - 可先发送 `<think></think>` 占位（配置 `sendThinkingMessage`）
+- 如果只看到“等待模型响应”而没有真实思考内容，请检查对应 session 的 `reasoningLevel` 是否为 `stream`；插件会为缺失值初始化为 `stream`，但不会覆盖用户已显式设置的 `off`
 - 思考流式更新采用 800ms 节流，防止 SDK 队列溢出
 - 最终回复 `finish=true` 时可附带图片 `msg_item`
 - 若最终回复包含 WS 不支持的媒体（文件等），会先文本提示再通过 Agent API 补发
@@ -489,6 +492,21 @@ scripts/install-plugin.sh
 `workspaceTemplate` 目录中的模板文件会在动态 Agent 首次创建时复制到工作区：
 
 - `AGENTS.md`、`BOOTSTRAP.md`、`CLAUDE.md`、`SOUL.md`、`TOOLS.md`、`IDENTITY.md`、`USER.md`、`HEARTBEAT.md`、`system-prompt.md`
+
+如果需要额外复制脚本或数据文件，可以配置 `workspaceTemplateExtraFiles`，值必须是 `workspaceTemplate` 下的相对路径：
+
+```json
+{
+  "channels": {
+    "wecom": {
+      "workspaceTemplate": "/path/to/template-dir",
+      "workspaceTemplateExtraFiles": ["scripts/", "requirements.txt", "tools/helper.py"]
+    }
+  }
+}
+```
+
+插件会递归复制目录，并跳过绝对路径、`../` 路径穿越、`.git`、`node_modules`、`.env*` 等敏感项。
 
 插件会在工作区里写入 `.openclaw/wecom-template-state.json` 记录首次模板同步状态。已有 state 的工作区后续只补缺，不覆盖已有文件。
 

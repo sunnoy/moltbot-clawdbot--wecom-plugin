@@ -78,6 +78,15 @@ class FakeWsClient extends EventEmitter {
   async downloadFile(url, aesKey) {
     this.downloadFileCalls.push({ url, aesKey });
     const value = this.downloadMap.get(url);
+    if (Array.isArray(value)) {
+      const next = value.shift();
+      if (next instanceof Error) {
+        throw next;
+      }
+      if (next) {
+        return next;
+      }
+    }
     if (value instanceof Error) {
       throw value;
     }
@@ -643,6 +652,44 @@ describe("WS e2e", () => {
     }
   });
 
+  it("extracts files from inbound mixed messages", async () => {
+    const fileUrl = "https://example.com/mixed-input.pdf";
+    const harness = await startHarness({
+      replyPayloadFactory: () => ({ text: "图文文件已收到" }),
+      downloadMap: new Map([
+        [
+          fileUrl,
+          {
+            buffer: Buffer.from("pdf-data"),
+            filename: "mixed-input.pdf",
+          },
+        ],
+      ]),
+    });
+
+    try {
+      harness.wsClient.emit(
+        "message",
+        createMessageFrame({
+          msgtype: "mixed",
+          mixed: {
+            msg_item: [
+              { msgtype: "text", text: { content: "请总结这个文件" } },
+              { msgtype: "file", file: { url: fileUrl, aeskey: "file-aes" } },
+            ],
+          },
+        }),
+      );
+
+      await eventually(() => assert.equal(harness.wsClient.replyStreamCalls.length, 1));
+      assert.deepEqual(harness.wsClient.downloadFileCalls, [{ url: fileUrl, aesKey: "file-aes" }]);
+      assert.equal(harness.runtime.ctxs[0].RawBody, "请总结这个文件");
+      assert.deepEqual(harness.runtime.ctxs[0].MediaTypes, ["application/octet-stream"]);
+    } finally {
+      await harness.stop();
+    }
+  });
+
   it("parses MEDIA lines from passive reply text and uploads via WS", async () => {
     const workspaceDir = path.join(tempDir, "workspace");
     const replyImagePath = path.join(workspaceDir, "reply.png");
@@ -1083,6 +1130,134 @@ describe("WS e2e", () => {
     }
   });
 
+  it("merges adjacent attachment-only and text messages from the same sender", async () => {
+    const fileUrl = "https://example.com/adjacent-input.pdf";
+    const harness = await startHarness({
+      replyPayloadFactory: () => ({ text: "合并处理完成" }),
+      downloadMap: new Map([
+        [
+          fileUrl,
+          {
+            buffer: Buffer.from("pdf-data"),
+            filename: "adjacent-input.pdf",
+          },
+        ],
+      ]),
+    });
+
+    try {
+      harness.wsClient.emit(
+        "message",
+        createMessageFrame({
+          msgtype: "file",
+          file: { url: fileUrl, aeskey: "file-aes" },
+        }),
+      );
+      await delay(100);
+      harness.wsClient.emit(
+        "message",
+        createMessageFrame({
+          msgtype: "text",
+          text: { content: "请总结这个文件" },
+        }),
+      );
+
+      await eventually(() => assert.equal(harness.wsClient.replyStreamCalls.length, 1));
+      assert.equal(harness.runtime.ctxs.length, 1);
+      assert.deepEqual(harness.wsClient.downloadFileCalls, [{ url: fileUrl, aesKey: "file-aes" }]);
+      assert.equal(harness.runtime.ctxs[0].RawBody, "请总结这个文件");
+      assert.deepEqual(harness.runtime.ctxs[0].MediaTypes, ["application/octet-stream"]);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it("merges multiple adjacent attachment-only messages before text", async () => {
+    const firstUrl = "https://example.com/adjacent-first.pdf";
+    const secondUrl = "https://example.com/adjacent-second.pdf";
+    const harness = await startHarness({
+      replyPayloadFactory: () => ({ text: "多文件合并处理完成" }),
+      downloadMap: new Map([
+        [firstUrl, { buffer: Buffer.from("first"), filename: "first.pdf" }],
+        [secondUrl, { buffer: Buffer.from("second"), filename: "second.pdf" }],
+      ]),
+    });
+
+    try {
+      harness.wsClient.emit(
+        "message",
+        createMessageFrame({
+          msgtype: "file",
+          file: { url: firstUrl, aeskey: "first-aes" },
+        }),
+      );
+      await delay(100);
+      harness.wsClient.emit(
+        "message",
+        createMessageFrame({
+          msgtype: "file",
+          file: { url: secondUrl, aeskey: "second-aes" },
+        }),
+      );
+      await delay(100);
+      harness.wsClient.emit(
+        "message",
+        createMessageFrame({
+          msgtype: "text",
+          text: { content: "请一起总结这些文件" },
+        }),
+      );
+
+      await eventually(() => assert.equal(harness.wsClient.replyStreamCalls.length, 1));
+      assert.equal(harness.runtime.ctxs.length, 1);
+      assert.deepEqual(harness.wsClient.downloadFileCalls, [
+        { url: firstUrl, aesKey: "first-aes" },
+        { url: secondUrl, aesKey: "second-aes" },
+      ]);
+      assert.equal(harness.runtime.ctxs[0].RawBody, "请一起总结这些文件");
+      assert.deepEqual(harness.runtime.ctxs[0].MediaTypes, ["application/octet-stream", "application/octet-stream"]);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it("retries encrypted inbound file downloads and replies with an explicit failure", async () => {
+    const fileUrl = "https://example.com/transient-input.pdf";
+    const harness = await startHarness({
+      replyPayloadFactory: () => ({ text: "不应调用模型" }),
+      downloadMap: new Map([
+        [
+          fileUrl,
+          [
+            new Error("Request failed with status code 503"),
+            new Error("Request failed with status code 503"),
+            new Error("Request failed with status code 503"),
+          ],
+        ],
+      ]),
+    });
+
+    try {
+      harness.wsClient.emit(
+        "message",
+        createMessageFrame({
+          msgtype: "file",
+          file: { url: fileUrl, aeskey: "file-aes" },
+        }),
+      );
+
+      await eventually(() => assert.equal(harness.wsClient.replyStreamCalls.length, 1), {
+        timeoutMs: 5_000,
+      });
+      assert.equal(harness.runtime.ctxs.length, 0);
+      assert.equal(harness.wsClient.downloadFileCalls.length, 3);
+      assert.match(harness.wsClient.replyStreamCalls[0].content, /下载失败/);
+      assert.match(harness.wsClient.replyStreamCalls[0].content, /503/);
+    } finally {
+      await harness.stop();
+    }
+  });
+
   it("matches the official dynamic thinking stream behavior", async () => {
     const harness = await startHarness({
       configOverrides: {
@@ -1205,7 +1380,7 @@ describe("WS e2e", () => {
       assert.equal(waiting1.finish, false);
 
       assert.equal(waiting2.streamId, waiting1.streamId);
-      assert.equal(waiting2.content, "<think>等待模型响应 1s\n等待模型响应 2s");
+      assert.equal(waiting2.content, "<think>等待模型响应 2s");
       assert.equal(waiting2.finish, false);
 
       assert.equal(reasoningFrame.streamId, waiting1.streamId);

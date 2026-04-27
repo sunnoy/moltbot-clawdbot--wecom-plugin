@@ -84,6 +84,8 @@ const REPLY_MEDIA_DIRECTIVE_PATTERN = /^\s*(?:[-*•]\s+|\d+\.\s+)?(?:MEDIA|FILE
 const WECOM_REPLY_MEDIA_GUIDANCE_HEADER = "[WeCom reply media rule]";
 const inboundMessageDeduplicator = new MessageDeduplicator();
 const sessionReasoningInitLocks = new Map();
+const pendingAttachmentMessages = new Map();
+const ATTACHMENT_TEXT_MERGE_WINDOW_MS = 800;
 
 function withTimeout(promise, timeoutMs, message) {
   if (!timeoutMs || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
@@ -133,11 +135,7 @@ function normalizeReasoningStreamText(text) {
 
 function buildWaitingModelContent(seconds) {
   const normalizedSeconds = Math.max(1, Number.parseInt(String(seconds ?? 1), 10) || 1);
-  const lines = [];
-  for (let current = 1; current <= normalizedSeconds; current += 1) {
-    lines.push(`等待模型响应 ${current}s`);
-  }
-  return `<think>${lines.join("\n")}`;
+  return `<think>等待模型响应 ${normalizedSeconds}s`;
 }
 
 function buildWaitingModelReasoningText(seconds) {
@@ -737,11 +735,12 @@ function resolveWelcomeMessage(account) {
   return DEFAULT_WELCOME_MESSAGES[index] || DEFAULT_WELCOME_MESSAGE;
 }
 
-function collectMixedMessageItems({ mixed, textParts, imageUrls, imageAesKeys }) {
+function collectMixedMessageItems({ mixed, textParts, imageUrls, imageAesKeys, fileUrls, fileAesKeys }) {
   let hasImage = false;
+  let hasFile = false;
 
   if (!Array.isArray(mixed?.msg_item)) {
-    return { hasImage };
+    return { hasImage, hasFile };
   }
 
   for (const item of mixed.msg_item) {
@@ -753,10 +752,16 @@ function collectMixedMessageItems({ mixed, textParts, imageUrls, imageAesKeys })
       if (item.image.aeskey) {
         imageAesKeys.set(item.image.url, item.image.aeskey);
       }
+    } else if (item.msgtype === "file" && item.file?.url) {
+      hasFile = true;
+      fileUrls.push(item.file.url);
+      if (item.file.aeskey) {
+        fileAesKeys.set(item.file.url, item.file.aeskey);
+      }
     }
   }
 
-  return { hasImage };
+  return { hasImage, hasFile };
 }
 
 function parseMessageContent(body) {
@@ -773,6 +778,8 @@ function parseMessageContent(body) {
       textParts,
       imageUrls,
       imageAesKeys,
+      fileUrls,
+      fileAesKeys,
     });
   } else {
     if (body?.text?.content) {
@@ -807,6 +814,8 @@ function parseMessageContent(body) {
         textParts: quoteTextParts,
         imageUrls,
         imageAesKeys,
+        fileUrls,
+        fileAesKeys,
       });
       quoteContent = quoteTextParts.join("\n").trim();
       if (!quoteContent && hasImage) {
@@ -828,12 +837,85 @@ function parseMessageContent(body) {
   return { textParts, imageUrls, imageAesKeys, fileUrls, fileAesKeys, quoteContent };
 }
 
+function resolvePendingAttachmentKey({ accountId, chatId, senderId }) {
+  return [accountId, chatId, senderId].map((entry) => String(entry ?? "")).join(":");
+}
+
+function mergeMapEntries(target, source) {
+  for (const [key, value] of source.entries()) {
+    target.set(key, value);
+  }
+}
+
+function consumePendingAttachmentMessage(key) {
+  const pending = pendingAttachmentMessages.get(key);
+  if (!pending) {
+    return null;
+  }
+  clearTimeout(pending.timer);
+  pendingAttachmentMessages.delete(key);
+  return pending;
+}
+
+function clearPendingAttachmentMessages(accountId) {
+  const prefix = `${accountId}:`;
+  for (const [key, pending] of pendingAttachmentMessages.entries()) {
+    if (!key.startsWith(prefix)) {
+      continue;
+    }
+    clearTimeout(pending.timer);
+    pendingAttachmentMessages.delete(key);
+  }
+}
+
+function isRetryableMediaDownloadError(error) {
+  const message = String(error?.message ?? error ?? "");
+  return (
+    /\b(429|500|502|503|504)\b/.test(message) ||
+    /timed out|timeout|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|network|socket/i.test(message)
+  );
+}
+
+function delayMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function downloadWeComMediaWithRetry({ wsClient, url, aesKey, type, timeoutMs }) {
+  const maxAttempts = 3;
+  let lastError;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await withTimeout(
+        wsClient.downloadFile(url, aesKey),
+        timeoutMs,
+        `${type} download timed out`,
+      );
+    } catch (error) {
+      lastError = error;
+      if (attempt >= maxAttempts || !isRetryableMediaDownloadError(error)) {
+        throw error;
+      }
+      const waitMs = 300 * attempt;
+      logger.warn(`[WS] ${type} download failed; retrying ${attempt}/${maxAttempts - 1}`, {
+        url,
+        error: error?.message || String(error),
+        waitMs,
+      });
+      await delayMs(waitMs);
+    }
+  }
+
+  throw lastError;
+}
+
 async function downloadAndSaveMedia({ wsClient, urls, aesKeys, type, runtime, config }) {
   const core = resolveChannelCore(runtime);
   const timeoutMs = type === "image" ? IMAGE_DOWNLOAD_TIMEOUT_MS : FILE_DOWNLOAD_TIMEOUT_MS;
   const mediaMaxMb = config?.agents?.defaults?.mediaMaxMb ?? DEFAULT_MEDIA_MAX_MB;
   const maxBytes = mediaMaxMb * 1024 * 1024;
   const mediaList = [];
+  const failures = [];
 
   for (const url of urls) {
     try {
@@ -842,14 +924,13 @@ async function downloadAndSaveMedia({ wsClient, urls, aesKeys, type, runtime, co
       let contentType = type === "image" ? "image/jpeg" : "application/octet-stream";
 
       try {
-        const result = await withTimeout(
-          wsClient.downloadFile(url, aesKeys?.get(url)),
-          timeoutMs,
-          `${type} download timed out`,
-        );
+        const result = await downloadWeComMediaWithRetry({ wsClient, url, aesKey: aesKeys?.get(url), type, timeoutMs });
         buffer = result.buffer;
         filename = result.filename;
       } catch (error) {
+        if (aesKeys?.get(url)) {
+          throw error;
+        }
         logger.debug(`[WS] SDK ${type} download failed, falling back to core media fetch: ${error.message}`);
         const fetched = await withTimeout(
           core.media.fetchRemoteMedia({ url }),
@@ -864,10 +945,11 @@ async function downloadAndSaveMedia({ wsClient, urls, aesKeys, type, runtime, co
       mediaList.push({ path: saved.path, contentType: saved.contentType });
     } catch (error) {
       logger.error(`[WS] Failed to download ${type}: ${error.message}`);
+      failures.push({ url, type, error: error?.message || String(error) });
     }
   }
 
-  return mediaList;
+  return { mediaList, failures };
 }
 
 async function sendWsReply({ wsClient, frame, text, finish = true, streamId, msgItem, accountId }) {
@@ -1077,7 +1159,17 @@ function buildInboundContext({
   return { ctxPayload: core.reply.finalizeInboundContext(context), storePath };
 }
 
-async function processWsMessage({ frame, account, config, runtime, wsClient, reqIdStore }) {
+async function processWsMessage({
+  frame,
+  account,
+  config,
+  runtime,
+  wsClient,
+  reqIdStore,
+  skipDedup = false,
+  skipAttachmentAggregation = false,
+  preAggregatedAttachments = null,
+}) {
   const core = resolveChannelCore(runtime);
   const body = frame?.body ?? {};
   const senderId = body?.from?.userid;
@@ -1097,7 +1189,7 @@ async function processWsMessage({ frame, account, config, runtime, wsClient, req
   }
 
   const dedupKey = `${account.accountId}:${messageId}`;
-  if (inboundMessageDeduplicator.isDuplicate(dedupKey)) {
+  if (!skipDedup && inboundMessageDeduplicator.isDuplicate(dedupKey)) {
     logger.debug(`[WS:${account.accountId}] Ignoring duplicate inbound message`, {
       messageId,
       senderId,
@@ -1130,8 +1222,17 @@ async function processWsMessage({ frame, account, config, runtime, wsClient, req
   recordInboundMessage({ accountId: account.accountId, chatId });
 
   const { textParts, imageUrls, imageAesKeys, fileUrls, fileAesKeys, quoteContent } = parseMessageContent(body);
+  if (preAggregatedAttachments) {
+    imageUrls.splice(0, imageUrls.length, ...preAggregatedAttachments.imageUrls);
+    fileUrls.splice(0, fileUrls.length, ...preAggregatedAttachments.fileUrls);
+    imageAesKeys.clear();
+    fileAesKeys.clear();
+    mergeMapEntries(imageAesKeys, preAggregatedAttachments.imageAesKeys);
+    mergeMapEntries(fileAesKeys, preAggregatedAttachments.fileAesKeys);
+  }
   const originalText = textParts.join("\n").trim();
   let text = originalText;
+  const pendingAttachmentKey = resolvePendingAttachmentKey({ accountId: account.accountId, chatId, senderId });
 
   logger.info(`[WS:${account.accountId}] ← inbound`, {
     senderId,
@@ -1148,6 +1249,71 @@ async function processWsMessage({ frame, account, config, runtime, wsClient, req
 
   if (!text && quoteContent) {
     text = quoteContent;
+  }
+
+  if (!skipAttachmentAggregation) {
+    const hasAttachment = imageUrls.length > 0 || fileUrls.length > 0;
+    const pending = text ? consumePendingAttachmentMessage(pendingAttachmentKey) : null;
+    if (pending) {
+      imageUrls.unshift(...pending.imageUrls);
+      fileUrls.unshift(...pending.fileUrls);
+      mergeMapEntries(imageAesKeys, pending.imageAesKeys);
+      mergeMapEntries(fileAesKeys, pending.fileAesKeys);
+      logger.info(`[WS:${account.accountId}] Merged adjacent attachment and text messages`, {
+        chatId,
+        senderId,
+        textMessageId: messageId,
+        attachmentMessageId: pending.messageId,
+        imageCount: pending.imageUrls.length,
+        fileCount: pending.fileUrls.length,
+      });
+    } else if (!text && hasAttachment) {
+      const existingPending = consumePendingAttachmentMessage(pendingAttachmentKey);
+      const pendingImageUrls = existingPending ? [...existingPending.imageUrls, ...imageUrls] : [...imageUrls];
+      const pendingFileUrls = existingPending ? [...existingPending.fileUrls, ...fileUrls] : [...fileUrls];
+      const pendingImageAesKeys = existingPending ? new Map(existingPending.imageAesKeys) : new Map();
+      const pendingFileAesKeys = existingPending ? new Map(existingPending.fileAesKeys) : new Map();
+      mergeMapEntries(pendingImageAesKeys, imageAesKeys);
+      mergeMapEntries(pendingFileAesKeys, fileAesKeys);
+      const delayedFrame = frame;
+      const delayedMessageId = messageId;
+      const delayedAttachments = {
+        imageUrls: pendingImageUrls,
+        imageAesKeys: pendingImageAesKeys,
+        fileUrls: pendingFileUrls,
+        fileAesKeys: pendingFileAesKeys,
+      };
+      const timer = setTimeout(() => {
+        pendingAttachmentMessages.delete(pendingAttachmentKey);
+        void processWsMessage({
+          frame: delayedFrame,
+          account,
+          config,
+          runtime,
+          wsClient,
+          reqIdStore,
+          skipDedup: true,
+          skipAttachmentAggregation: true,
+          preAggregatedAttachments: delayedAttachments,
+        });
+      }, ATTACHMENT_TEXT_MERGE_WINDOW_MS);
+      pendingAttachmentMessages.set(pendingAttachmentKey, {
+        timer,
+        messageId: delayedMessageId,
+        imageUrls: pendingImageUrls,
+        imageAesKeys: pendingImageAesKeys,
+        fileUrls: pendingFileUrls,
+        fileAesKeys: pendingFileAesKeys,
+      });
+      logger.debug(`[WS:${account.accountId}] Delaying attachment-only message for possible text merge`, {
+        chatId,
+        senderId,
+        messageId,
+        imageCount: pendingImageUrls.length,
+        fileCount: pendingFileUrls.length,
+      });
+      return;
+    }
   }
 
   if (body?.quote && quoteContent && text && quoteContent !== text) {
@@ -1233,7 +1399,7 @@ async function processWsMessage({ frame, account, config, runtime, wsClient, req
     return;
   }
 
-  const [imageMediaList, fileMediaList] = await Promise.all([
+  const [imageDownload, fileDownload] = await Promise.all([
     downloadAndSaveMedia({
       wsClient,
       urls: imageUrls,
@@ -1251,11 +1417,38 @@ async function processWsMessage({ frame, account, config, runtime, wsClient, req
       config,
     }),
   ]);
+  const imageMediaList = imageDownload.mediaList;
+  const fileMediaList = fileDownload.mediaList;
+  const mediaDownloadFailures = [...imageDownload.failures, ...fileDownload.failures];
   const mediaList = [...imageMediaList, ...fileMediaList];
   logPerf("media_ready", {
     imageCount: imageMediaList.length,
     fileCount: fileMediaList.length,
+    failedCount: mediaDownloadFailures.length,
   });
+
+  if (mediaDownloadFailures.length > 0) {
+    const failedTypes = [...new Set(mediaDownloadFailures.map((entry) => entry.type === "image" ? "图片" : "文件"))];
+    const firstError = mediaDownloadFailures[0]?.error ? `\n错误详情：${mediaDownloadFailures[0].error}` : "";
+    const failureText = [
+      `${failedTypes.join("、")}下载失败，暂时无法处理附件内容。`,
+      `企业微信接口可能临时返回 503/超时，请稍后重发附件再试。${firstError}`,
+    ].join("\n");
+    logger.warn(`[WS:${account.accountId}] Inbound media download failed; replying without dispatch`, {
+      chatId,
+      senderId,
+      failures: mediaDownloadFailures,
+    });
+    await sendWsReply({
+      wsClient,
+      frame,
+      streamId: generateReqId("media-download-failed"),
+      text: failureText,
+      finish: true,
+      accountId: account.accountId,
+    });
+    return;
+  }
 
   const streamId = reqIdStore?.getSync(chatId) ?? generateReqId("stream");
   if (reqIdStore) reqIdStore.set(chatId, streamId);
@@ -1703,7 +1896,7 @@ async function processWsMessage({ frame, account, config, runtime, wsClient, req
     chatType: isGroupChat ? "group" : "single",
   });
 
-  await ensureDefaultSessionReasoningLevel({
+  const sessionReasoningMeta = await ensureDefaultSessionReasoningLevel({
     core,
     storePath,
     sessionKey: ctxPayload.SessionKey ?? route.sessionKey,
@@ -1853,6 +2046,18 @@ async function processWsMessage({ frame, account, config, runtime, wsClient, req
           hasMedia: state.hasMedia,
           hasMediaFailed: state.hasMediaFailed,
         });
+        if (
+          account.sendThinkingMessage !== false &&
+          !perfState.firstReasoningReceivedAt &&
+          state.waitingModelSeconds > 0
+        ) {
+          logger.info(`[WS:${account.accountId}] No reasoning stream received for thinking placeholder`, {
+            sessionKey: ctxPayload.SessionKey ?? route.sessionKey,
+            reasoningLevel: sessionReasoningMeta?.reasoningLevel ?? null,
+            waitingModelSeconds: state.waitingModelSeconds,
+            visibleChars: stripThinkTags(state.accumulatedText).length,
+          });
+        }
       } catch (sendError) {
         logger.warn(`[WS] Final reply send failed, enqueuing for retry: ${sendError.message}`, {
           accountId: account.accountId,
@@ -1965,6 +2170,7 @@ export async function startWsMonitor({ account, config, runtime, abortSignal, ws
     let settled = false;
 
     const cleanup = async () => {
+      clearPendingAttachmentMessages(account.accountId);
       try {
         await reqIdStore.flush();
       } catch (flushErr) {

@@ -203,12 +203,14 @@ describe("seedAgentWorkspace", () => {
   it("copies IDENTITY.md alongside system-prompt.md", () => {
     writeFileSync(join(templateDir, "system-prompt.md"), "system prompt");
     writeFileSync(join(templateDir, "IDENTITY.md"), "identity");
+    writeFileSync(join(templateDir, "CLAUDE.md"), "claude");
 
     seedAgentWorkspace("wecom-dm-test2", {}, templateDir);
 
     const wsDir = join(stateDir, "workspace-wecom-dm-test2");
     assert.equal(existsSync(join(wsDir, "system-prompt.md")), true);
     assert.equal(existsSync(join(wsDir, "IDENTITY.md")), true);
+    assert.equal(existsSync(join(wsDir, "CLAUDE.md")), true);
     assert.equal(existsSync(join(wsDir, ".openclaw", "wecom-template-state.json")), true);
   });
 
@@ -304,6 +306,52 @@ describe("seedAgentWorkspace", () => {
 
     assert.equal(readFileSync(join(wsDir, "system-prompt.md"), "utf8"), "sp-updated");
     assert.equal(readFileSync(join(wsDir, "IDENTITY.md"), "utf8"), "id-user-edit");
+  });
+
+  it("copies configured extra template files and directories", () => {
+    mkdirSync(join(templateDir, "scripts"), { recursive: true });
+    writeFileSync(join(templateDir, "scripts", "helper.py"), "print('ok')\n");
+    writeFileSync(join(templateDir, "requirements.txt"), "requests\n");
+    writeFileSync(join(templateDir, "system-prompt.md"), "sp");
+
+    seedAgentWorkspace(
+      "wecom-dm-extra",
+      {
+        channels: {
+          wecom: {
+            workspaceTemplateExtraFiles: ["scripts/", "requirements.txt"],
+          },
+        },
+      },
+      templateDir,
+    );
+
+    const wsDir = join(stateDir, "workspace-wecom-dm-extra");
+    assert.equal(readFileSync(join(wsDir, "scripts", "helper.py"), "utf8"), "print('ok')\n");
+    assert.equal(readFileSync(join(wsDir, "requirements.txt"), "utf8"), "requests\n");
+    assert.equal(readFileSync(join(wsDir, "system-prompt.md"), "utf8"), "sp");
+  });
+
+  it("skips unsafe extra template entries", () => {
+    writeFileSync(join(templateDir, "system-prompt.md"), "sp");
+    writeFileSync(join(templateDir, ".env"), "SECRET=1");
+
+    seedAgentWorkspace(
+      "wecom-dm-unsafe-extra",
+      {
+        channels: {
+          wecom: {
+            workspaceTemplateExtraFiles: [".env", "../outside.py"],
+          },
+        },
+      },
+      templateDir,
+    );
+
+    const wsDir = join(stateDir, "workspace-wecom-dm-unsafe-extra");
+    assert.equal(existsSync(join(wsDir, ".env")), false);
+    assert.equal(existsSync(join(wsDir, "outside.py")), false);
+    assert.equal(readFileSync(join(wsDir, "system-prompt.md"), "utf8"), "sp");
   });
 });
 

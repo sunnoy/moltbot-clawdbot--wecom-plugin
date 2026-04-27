@@ -1,5 +1,20 @@
 # Changelog
 
+## 3.2.0 (2026-04-27)
+
+相对 [v3.1.0](https://github.com/sunnoy/openclaw-plugin-wecom/releases/tag/v3.1.0) 的变更摘要。
+
+### Features
+
+- **Workspace 模板额外文件**: 新增 `channels.wecom.workspaceTemplateExtraFiles`，支持在默认引导文件之外复制相对路径脚本/配置目录，并跳过 `.git`、`node_modules`、`.env*` 和路径穿越项
+- **文件+文本入站聚合**: WS 入站对纯附件消息增加短窗口等待，可与同一用户紧邻文本合并为一次处理；`mixed` 消息同步支持提取文件附件
+
+### Fixes
+
+- **入站文件下载失败显式回复**: 加密附件下载失败时不再 fallback 到普通 HTTP 读取，也不再把空/乱码上下文交给模型猜测；会重试后直接提示用户重发附件
+- **等待模型响应不再堆叠**: 思考占位只刷新当前秒数，避免 `等待模型响应 1s/2s/...` 在企微卡片中持续堆叠
+- **思考流诊断增强**: `sendThinkingMessage=true` 但未收到 OpenClaw reasoning stream 时记录 session `reasoningLevel`，便于排查是否被显式设为 `off`
+
 ## 3.1.0 (2026-04-27)
 
 相对 [v3.0.1](https://github.com/sunnoy/openclaw-plugin-wecom/releases/tag/v3.0.1) 的变更摘要。

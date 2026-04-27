@@ -29,7 +29,7 @@ describe("RESERVED_KEYS — dictionary mode (issue #79)", () => {
     assert.deepEqual(ids, ["bot1"]);
   });
 
-  it("does not treat 'commands', 'dynamicAgents', 'dm', 'groupChat', 'welcomeMessage', 'welcomeMessagesFile' as account IDs", () => {
+  it("does not treat shared channel config keys as account IDs", () => {
     const cfg = {
       channels: {
         wecom: {
@@ -45,6 +45,7 @@ describe("RESERVED_KEYS — dictionary mode (issue #79)", () => {
           welcomeMessagesFile: "welcome.json",
           adminUsers: ["admin1"],
           workspaceTemplate: "/path/to/templates",
+          workspaceTemplateExtraFiles: ["scripts/", "requirements.txt"],
           instances: [],
         },
       },
