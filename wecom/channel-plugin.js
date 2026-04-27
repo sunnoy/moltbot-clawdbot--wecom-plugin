@@ -274,6 +274,8 @@ export const wecomChannelPlugin = {
         sendThinkingMessage: { type: "boolean" },
         welcomeMessage: { type: "string" },
         welcomeMessagesFile: { type: "string" },
+        workspaceTemplate: { type: "string" },
+        workspaceTemplateExtraFiles: { type: "array", items: { type: "string" } },
         dmPolicy: { enum: ["pairing", "allowlist", "open", "disabled"] },
         allowFrom: { type: "array", items: { type: "string" } },
         groupPolicy: { enum: ["open", "allowlist", "disabled"] },

@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { logger } from "../logger.js";
 import { BOOTSTRAP_FILENAMES } from "./constants.js";
 import {
@@ -173,6 +173,78 @@ function collectExistingSeededFiles(workspaceDir, templateFiles) {
   return templateFiles.filter((file) => existsSync(join(workspaceDir, file)));
 }
 
+function getWorkspaceTemplateExtraFiles(config) {
+  const values = config?.channels?.wecom?.workspaceTemplateExtraFiles;
+  if (!Array.isArray(values)) {
+    return [];
+  }
+  return values.map((entry) => String(entry ?? "").trim()).filter(Boolean);
+}
+
+function isUnsafeTemplateRelativePath(file) {
+  const raw = String(file ?? "").trim();
+  const normalized = raw.replace(/\\/g, "/");
+  if (
+    !normalized ||
+    normalized.startsWith("/") ||
+    /^[A-Za-z]:\//.test(normalized) ||
+    normalized.startsWith("../") ||
+    normalized.includes("/../")
+  ) {
+    return true;
+  }
+  return normalized
+    .split("/")
+    .some((part) => part === ".git" || part === "node_modules" || part === ".env" || part.startsWith(".env."));
+}
+
+function isPathInside(parent, child) {
+  const rel = relative(parent, child);
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+function collectDirectoryFiles(rootDir, dir, baseRel, out) {
+  for (const entry of readdirSync(dir)) {
+    const relPath = join(baseRel, entry);
+    if (isUnsafeTemplateRelativePath(relPath)) {
+      continue;
+    }
+    const absolute = join(rootDir, relPath);
+    const st = statSync(absolute);
+    if (st.isDirectory()) {
+      collectDirectoryFiles(rootDir, absolute, relPath, out);
+    } else if (st.isFile()) {
+      out.add(relPath);
+    }
+  }
+}
+
+function collectTemplateFiles(config, templateDir) {
+  const files = new Set(readdirSync(templateDir).filter((file) => BOOTSTRAP_FILENAMES.has(file)));
+  const root = resolve(templateDir);
+
+  for (const entry of getWorkspaceTemplateExtraFiles(config)) {
+    if (isUnsafeTemplateRelativePath(entry)) {
+      logger.warn("WeCom: skipped unsafe workspaceTemplateExtraFiles entry", { entry });
+      continue;
+    }
+    const relEntry = entry.replace(/\\/g, "/").replace(/^\/+/, "");
+    const absolute = resolve(root, relEntry);
+    if (!isPathInside(root, absolute) || !existsSync(absolute)) {
+      logger.warn("WeCom: skipped missing or escaping workspaceTemplateExtraFiles entry", { entry });
+      continue;
+    }
+    const st = statSync(absolute);
+    if (st.isDirectory()) {
+      collectDirectoryFiles(root, absolute, relEntry, files);
+    } else if (st.isFile()) {
+      files.add(relEntry);
+    }
+  }
+
+  return [...files];
+}
+
 /**
  * Copy selected template files into a dynamic agent workspace.
  * BOOTSTRAP.md may be synced only before user memory markers appear; once the
@@ -203,7 +275,7 @@ export function seedAgentWorkspace(agentId, config, overrideTemplateDir) {
     const templateMaxMtimeMs = getTemplateMaxMtimeMs(templateDir);
     mkdirSync(workspaceDir, { recursive: true });
 
-    const templateFiles = readdirSync(templateDir).filter((file) => BOOTSTRAP_FILENAMES.has(file));
+    const templateFiles = collectTemplateFiles(config, templateDir);
     let state = readTemplateState(workspaceDir);
     const isLegacyWorkspace = !state && workspaceExistedBefore;
     const isFirstSeed = !state && !workspaceExistedBefore;
@@ -230,9 +302,11 @@ export function seedAgentWorkspace(agentId, config, overrideTemplateDir) {
         if (!isFirstSeed) {
           continue;
         }
+        mkdirSync(join(dest, ".."), { recursive: true });
         copyFileSync(src, dest);
         logger.info("WeCom: re-seeded workspace file", { agentId, file, isFirstSeed });
       } else {
+        mkdirSync(join(dest, ".."), { recursive: true });
         copyFileSync(src, dest);
         logger.info("WeCom: seeded workspace file", { agentId, file });
       }
