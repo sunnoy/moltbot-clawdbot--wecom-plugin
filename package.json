@@ -1,66 +1,73 @@
 {
-    "name": "@sunnoy/wecom",
-    "version": "3.2.0",
-    "description": "Enterprise WeChat AI Bot channel plugin for OpenClaw",
-    "type": "module",
-    "main": "index.js",
-    "files": [
-        "index.js",
-        "wecom",
-        "dynamic-agent.js",
-        "logger.js",
-        "README.md",
-        "LICENSE",
-        "CONTRIBUTING.md",
-        "skills",
-        "think-parser.js",
-        "utils.js",
-        "openclaw.plugin.json"
+  "name": "@sunnoy/wecom",
+  "version": "3.2.0",
+  "description": "Enterprise WeChat AI Bot channel plugin for OpenClaw",
+  "type": "module",
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "wecom",
+    "dynamic-agent.js",
+    "logger.js",
+    "README.md",
+    "LICENSE",
+    "CONTRIBUTING.md",
+    "skills",
+    "think-parser.js",
+    "utils.js",
+    "openclaw.plugin.json"
+  ],
+  "peerDependencies": {
+    "openclaw": "^2026.3.23-2"
+  },
+  "optionalDependencies": {
+    "undici": "^7.0.0"
+  },
+  "scripts": {
+    "test": "npm run test:unit",
+    "test:unit": "node --test tests/*.test.js"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.js"
     ],
-    "peerDependencies": {
-        "openclaw": "^2026.3.23-2"
-    },
-    "optionalDependencies": {
-        "undici": "^7.0.0"
-    },
-    "scripts": {
-        "test": "npm run test:unit",
-        "test:unit": "node --test tests/*.test.js"
-    },
-    "openclaw": {
-        "extensions": [
-            "./index.js"
-        ],
-        "channel": {
-            "id": "wecom",
-            "label": "Enterprise WeChat",
-            "selectionLabel": "Enterprise WeChat (AI Bot)",
-            "docsPath": "/channels/wecom",
-            "docsLabel": "wecom",
-            "blurb": "Support for Enterprise WeChat (WeCom) AI Bot integration",
-            "order": 90,
-            "aliases": [
-                "wecom",
-                "wework"
-            ]
-        },
-        "install": {
-            "defaultChoice": "npm",
-            "npmSpec": "@sunnoy/wecom"
-        }
-    },
-    "keywords": [
-        "openclaw",
+    "channel": {
+      "id": "wecom",
+      "label": "Enterprise WeChat",
+      "selectionLabel": "Enterprise WeChat (AI Bot)",
+      "docsPath": "/channels/wecom",
+      "docsLabel": "wecom",
+      "blurb": "Support for Enterprise WeChat (WeCom) AI Bot integration",
+      "order": 90,
+      "aliases": [
         "wecom",
-        "enterprise-wechat",
-        "chat",
-        "plugin"
-    ],
-    "author": "",
-    "license": "ISC",
-    "dependencies": {
-        "@wecom/aibot-node-sdk": "^1.0.6",
-        "file-type": "^21.3.0",
-        "pinyin-pro": "^3.28.0"
+        "wework"
+      ]
+    },
+    "install": {
+      "defaultChoice": "npm",
+      "npmSpec": "@sunnoy/wecom"
+    },
+    "compat": {
+      "pluginApi": ">=2026.3.23-2",
+      "minGatewayVersion": ">=2026.3.23-2"
+    },
+    "build": {
+      "openclawVersion": "2026.3.23-2"
     }
+  },
+  "keywords": [
+    "openclaw",
+    "wecom",
+    "enterprise-wechat",
+    "chat",
+    "plugin"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@wecom/aibot-node-sdk": "^1.0.6",
+    "file-type": "^21.3.0",
+    "pinyin-pro": "^3.28.0"
+  }
 }
