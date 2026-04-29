@@ -41,6 +41,19 @@ describe("shouldUseDynamicAgent", () => {
     });
     assert.equal(useDynamic, true);
   });
+
+  it("keeps group routing on the group agent for admin when adminBypass is enabled", () => {
+    const config = {
+      dynamicAgents: { enabled: true, adminBypass: true },
+      groupChat: { enabled: true },
+    };
+    const useDynamic = shouldUseDynamicAgent({
+      chatType: "group",
+      config,
+      senderIsAdmin: true,
+    });
+    assert.equal(useDynamic, true);
+  });
 });
 
 describe("extractGroupMessageContent", () => {

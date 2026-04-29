@@ -59,7 +59,7 @@ export function shouldUseDynamicAgent({ chatType, config, senderIsAdmin = false 
   if (!dynamicConfig.enabled) {
     return false;
   }
-  if (senderIsAdmin && dynamicConfig.adminBypass) {
+  if (chatType === "dm" && senderIsAdmin && dynamicConfig.adminBypass) {
     return false;
   }
   if (chatType === "group") {

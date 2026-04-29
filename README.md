@@ -212,7 +212,7 @@ npm test
 | 配置项 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `channels.wecom.dynamicAgents.enabled` | boolean | 否 | 是否启用动态 Agent，默认 `true` |
-| `channels.wecom.dynamicAgents.adminBypass` | boolean | 否 | 管理员是否绕过动态 Agent，默认 `false` |
+| `channels.wecom.dynamicAgents.adminBypass` | boolean | 否 | 管理员私聊是否绕过动态 Agent，默认 `false`；群聊不受此项影响，仍按群路由 |
 | `channels.wecom.dm.createAgentOnFirstMessage` | boolean | 否 | 私聊是否按用户建独立 Agent，默认 `true` |
 | `channels.wecom.groupChat.enabled` | boolean | 否 | 是否启用群聊处理，默认 `true` |
 | `channels.wecom.groupChat.requireMention` | boolean | 否 | 群聊是否要求 @ 才响应，默认 `true` |
