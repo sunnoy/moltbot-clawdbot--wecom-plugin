@@ -56,6 +56,7 @@
 - [相比官方插件的增强特性](#相比官方插件的增强特性)
 - [前置要求](#前置要求)
 - [安装](#安装)
+- [配合 X/Twitter 自动化](#配合-xtwitter-自动化)
 - [从 HTTP 回调迁移](#从-http-回调迁移)
 - [运行测试](#运行测试)
 - [配置](#配置)
@@ -93,6 +94,21 @@ openclaw plugins install @sunnoy/wecom
 > **3.1 MCP 说明：** `wecom_mcp` 已按官方 `@wecom/wecom-openclaw-plugin@2026.4.23` 协商版本与 `@wecom/aibot-node-sdk@1.0.6` 对齐。企业规模和机器人权限仍由企业微信后端控制；当前大型企业常见只开放 `doc` 类 MCP 能力。
 
 > **从官方插件迁移：** 如果之前使用 `openclaw plugins install @wecom/wecom-openclaw-plugin`，请先卸载官方插件再安装本插件。`channels.wecom` 配置字段兼容，无需修改。
+
+## 配合 X/Twitter 自动化
+
+`@sunnoy/wecom` 负责把 OpenClaw Agent 接入企业微信私聊、群聊、自建应用和 webhook 通知。如果同一个企业微信会话还需要 X/Twitter 工作流，可以把 [TweetClaw](https://github.com/Xquik-dev/tweetclaw) 作为配套 OpenClaw 插件一起安装：
+
+```bash
+openclaw plugins install @xquik/tweetclaw
+openclaw config set tools.alsoAllow '["explore", "tweetclaw"]'
+```
+
+推荐边界：
+
+- WeCom 插件继续负责企业微信用户、群聊、文件、流式回复、动态 Agent 路由和企业内通知。
+- TweetClaw 负责 X/Twitter 的 tweet scraper、搜索推文、搜索回复、粉丝导出、用户查询、发推、回复、媒体上传/下载、私信、监控、webhook 和抽奖。
+- TweetClaw 的 API key 由插件配置注入，不会暴露给模型；发推、回复、关注、私信、监控、webhook 等可见或写入类动作仍由 OpenClaw approval prompt（审批提示）审核。
 
 ## 从 HTTP 回调迁移
 
