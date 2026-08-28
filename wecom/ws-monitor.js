@@ -10,7 +10,7 @@ import { agentSendMedia, agentSendText, agentUploadMedia } from "./agent-api.js"
 import { applyOutboundSenderProtocol, resolveOutboundSenderLabel } from "./outbound-sender-protocol.js";
 import { buildCfgForDispatch } from "./cfg-for-dispatch.js";
 import { logger } from "../logger.js";
-import { normalizeThinkingTags } from "../think-parser.js";
+import { normalizeThinkingTags, parseThinkingContent } from "../think-parser.js";
 import { MessageDeduplicator } from "../utils.js";
 import {
   extractGroupMessageContent,
@@ -867,6 +867,31 @@ function stripThinkTags(text) {
   return String(text ?? "").replace(/<think>[\s\S]*?<\/think>/g, "").trim();
 }
 
+/**
+ * Resolve the visible text that should be forwarded to WeCom for a streamed
+ * reply, avoiding thinking content leaks:
+ *
+ * - When the model reports reasoning through the dedicated reasoning stream
+ *   (state.reasoningText is set), any `<think>...</think>` blocks echoed into
+ *   the visible text stream are redundant and MUST be stripped — otherwise
+ *   buildWsStreamContent would emit nested `<think>` tags and the WeCom
+ *   client would surface the thinking content as visible text.
+ * - When the model writes its thinking directly into the text stream (no
+ *   reasoning stream), the thinking blocks are kept and normalized so the
+ *   WeCom client can render them as a collapsed "已完成思考" block.
+ *
+ * @param {string} accumulatedText
+ * @param {string} reasoningText
+ * @returns {string}
+ */
+function resolveStreamVisibleText(accumulatedText, reasoningText) {
+  const raw = String(accumulatedText ?? "");
+  if (String(reasoningText ?? "").trim()) {
+    return parseThinkingContent(raw).visibleContent;
+  }
+  return raw;
+}
+
 async function sendMediaBatch({ wsClient, frame, state, account, runtime, config, agentId }) {
   const mediaLocalRoots = resolveReplyMediaLocalRoots(config, agentId);
 
@@ -967,12 +992,12 @@ async function flushQueuedReplyMedia({ wsClient, frame, state, account, runtime,
 }
 
 async function finishThinkingStream({ wsClient, frame, state, accountId }) {
-  const visibleText = stripThinkTags(state.accumulatedText);
+  const visibleText = resolveStreamVisibleText(state.accumulatedText, state.reasoningText);
   let finishText;
   let allowEmpty = false;
 
   if (visibleText) {
-    let finalVisibleText = state.accumulatedText;
+    let finalVisibleText = visibleText;
     if (state.hasMediaFailed && state.mediaErrorSummary) {
       finalVisibleText += `\n\n${state.mediaErrorSummary}`;
     }
@@ -1945,7 +1970,7 @@ async function processWsMessage({
     lastStreamSentAt = lastReasoningSendAt;
     const streamText = buildWsStreamContent({
       reasoningText: state.reasoningText,
-      visibleText: state.accumulatedText,
+      visibleText: resolveStreamVisibleText(state.accumulatedText, state.reasoningText),
       finish: false,
     });
     if (streamText) {
@@ -1977,7 +2002,7 @@ async function processWsMessage({
     if (!canSendIntermediate()) return;
     lastVisibleSendAt = Date.now();
     lastStreamSentAt = lastVisibleSendAt;
-    const visibleText = state.accumulatedText;
+    const visibleText = resolveStreamVisibleText(state.accumulatedText, state.reasoningText);
     const streamText = buildWsStreamContent({
       reasoningText: state.reasoningText,
       visibleText,
@@ -2139,13 +2164,14 @@ async function processWsMessage({
     await flushPendingStreamUpdates();
 
     const oldStreamId = state.streamId;
-    const hasVisibleText = Boolean(stripThinkTags(state.accumulatedText));
+    const visibleText = resolveStreamVisibleText(state.accumulatedText, state.reasoningText);
+    const hasVisibleText = Boolean(visibleText);
 
     // Build finish content.  When still in the thinking phase (no visible
     // text yet), append a small marker so the finished message is not empty.
     const finishText = buildWsStreamContent({
       reasoningText: state.reasoningText,
-      visibleText: hasVisibleText ? state.accumulatedText : "⏳ 处理中…",
+      visibleText: hasVisibleText ? visibleText : "⏳ 处理中…",
       finish: true,
     });
 
@@ -2380,7 +2406,7 @@ async function processWsMessage({
                 }
 
                 const passiveMarkdownCandidate = buildPassiveMarkdownReplyText(
-                  state.accumulatedText,
+                  parseThinkingContent(state.accumulatedText).visibleContent,
                   state.replyMediaUrls,
                 );
                 if (shouldUsePassiveMarkdownReply(passiveMarkdownCandidate, state.replyMediaUrls)) {

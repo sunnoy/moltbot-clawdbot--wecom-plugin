@@ -24,7 +24,7 @@ import {
   shouldUseDynamicAgent,
 } from "../dynamic-agent.js";
 import { ensureDynamicAgentListed } from "./workspace-template.js";
-import { normalizeThinkingTags } from "../think-parser.js";
+import { normalizeThinkingTags, parseThinkingContent } from "../think-parser.js";
 import { MessageDeduplicator, splitTextByByteLimit } from "../utils.js";
 import { recordInboundMessage, recordOutboundActivity } from "./runtime-telemetry.js";
 import { setConfigProxyUrl } from "./http.js";
@@ -194,7 +194,8 @@ async function loadLocalReplyMedia(mediaUrl, config, agentId, runtime) {
 }
 
 function resolveCallbackFinalText(accumulatedText, replyMediaUrls = []) {
-  const normalizedText = normalizeThinkingTags(String(accumulatedText ?? "").trim());
+  const { visibleContent } = parseThinkingContent(String(accumulatedText ?? "").trim());
+  const normalizedText = normalizeThinkingTags(visibleContent);
   if (normalizedText) {
     return normalizedText;
   }
