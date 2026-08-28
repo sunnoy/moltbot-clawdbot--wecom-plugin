@@ -260,9 +260,17 @@ describe("loadLocalReplyMedia", () => {
 });
 
 describe("resolveCallbackFinalText", () => {
-  it("normalizes think-tag variants before returning visible text replies", () => {
+  it("strips thinking blocks before returning visible text replies", () => {
     const text = callbackInboundTesting.resolveCallbackFinalText("<thinking>先分析</thinking>\n最终答复", []);
-    assert.equal(text, "<think>先分析</think>\n最终答复");
+    assert.equal(text, "最终答复");
+  });
+
+  it("strips thinking content even when it appears before and inside the visible text", () => {
+    const text = callbackInboundTesting.resolveCallbackFinalText(
+      "<think>思考一</think>可见开头<think>思考二</think>可见结尾",
+      [],
+    );
+    assert.equal(text, "可见开头可见结尾");
   });
 
   it("does not inject the model-unavailable fallback for media-only replies", () => {
